@@ -8,7 +8,7 @@ use tui_input::Input;
 
 use super::DialogResult;
 use crate::tui::components::{
-    longest_common_prefix, render_text_field, render_text_field_with_ghost, ListPicker,
+    render_text_field, render_text_field_with_ghost, GroupGhostCompletion, ListPicker,
     ListPickerResult,
 };
 use crate::tui::styles::Theme;
@@ -22,12 +22,6 @@ pub struct RenameData {
     pub group: Option<String>,
     /// New profile (None means keep current, Some(name) means move to that profile)
     pub profile: Option<String>,
-}
-
-struct GroupGhostCompletion {
-    input_snapshot: String,
-    cursor_snapshot: usize,
-    ghost_text: String,
 }
 
 pub struct RenameDialog {
@@ -93,80 +87,20 @@ impl RenameDialog {
     }
 
     fn recompute_group_ghost(&mut self) {
-        self.group_ghost = None;
-
-        if self.existing_groups.is_empty() {
-            return;
-        }
-
-        let value = self.new_group.value().to_string();
-        if value.is_empty() {
-            return;
-        }
-
-        let char_len = value.chars().count();
-        let cursor_char = self.new_group.visual_cursor().min(char_len);
-
-        if cursor_char < char_len {
-            return;
-        }
-
-        let mut matches: Vec<String> = self
-            .existing_groups
-            .iter()
-            .filter(|g| g.starts_with(&value))
-            .cloned()
-            .collect();
-
-        if matches.is_empty() {
-            return;
-        }
-        matches.sort();
-
-        let ghost_text = if matches.len() == 1 {
-            matches[0][value.len()..].to_string()
-        } else {
-            let common = longest_common_prefix(&matches);
-            if common.len() > value.len() {
-                common[value.len()..].to_string()
-            } else {
-                matches[0][value.len()..].to_string()
-            }
-        };
-
-        if ghost_text.is_empty() {
-            return;
-        }
-
-        self.group_ghost = Some(GroupGhostCompletion {
-            input_snapshot: value,
-            cursor_snapshot: cursor_char,
-            ghost_text,
-        });
+        self.group_ghost = GroupGhostCompletion::compute(&self.new_group, &self.existing_groups);
     }
 
-    fn accept_group_ghost(&mut self) -> bool {
-        let ghost = match self.group_ghost.take() {
-            Some(g) => g,
-            None => return false,
-        };
-
-        let value = self.new_group.value().to_string();
-        let cursor_char = self.new_group.visual_cursor().min(value.chars().count());
-
-        if ghost.input_snapshot != value || ghost.cursor_snapshot != cursor_char {
-            return false;
+    fn accept_group_ghost(&mut self) {
+        if let Some(ghost) = self.group_ghost.take() {
+            if let Some(new_value) = ghost.accept(&self.new_group) {
+                self.new_group = Input::new(new_value);
+                self.recompute_group_ghost();
+            }
         }
-
-        let mut new_value = value;
-        new_value.push_str(&ghost.ghost_text);
-        self.new_group = Input::new(new_value);
-        self.recompute_group_ghost();
-        true
     }
 
     fn group_ghost_text(&self) -> Option<&str> {
-        self.group_ghost.as_ref().map(|g| g.ghost_text.as_str())
+        self.group_ghost.as_ref().map(|g| g.ghost_text())
     }
 
     fn selected_profile(&self) -> &str {
@@ -1139,5 +1073,86 @@ mod tests {
             }
             _ => panic!("Expected Submit"),
         }
+    }
+
+    // --- Group ghost autocomplete tests ---
+
+    #[test]
+    fn test_group_ghost_appears_on_typing() {
+        let mut dialog =
+            RenameDialog::new("Test", "", "default", default_profiles(), sample_groups());
+        dialog.handle_key(key(KeyCode::Tab)); // Focus group field
+        dialog.handle_key(key(KeyCode::Char('p')));
+        assert_eq!(dialog.group_ghost_text(), Some("ersonal"));
+    }
+
+    #[test]
+    fn test_group_ghost_none_when_no_match() {
+        let mut dialog =
+            RenameDialog::new("Test", "", "default", default_profiles(), sample_groups());
+        dialog.handle_key(key(KeyCode::Tab));
+        dialog.handle_key(key(KeyCode::Char('z')));
+        assert!(dialog.group_ghost_text().is_none());
+    }
+
+    #[test]
+    fn test_group_ghost_accept_with_right_arrow() {
+        let mut dialog =
+            RenameDialog::new("Test", "", "default", default_profiles(), sample_groups());
+        dialog.handle_key(key(KeyCode::Tab));
+        dialog.handle_key(key(KeyCode::Char('p')));
+        assert!(dialog.group_ghost_text().is_some());
+
+        dialog.handle_key(key(KeyCode::Right));
+        assert_eq!(dialog.new_group.value(), "personal");
+    }
+
+    #[test]
+    fn test_group_ghost_accept_with_end_key() {
+        let mut dialog =
+            RenameDialog::new("Test", "", "default", default_profiles(), sample_groups());
+        dialog.handle_key(key(KeyCode::Tab));
+        dialog.handle_key(key(KeyCode::Char('p')));
+        assert!(dialog.group_ghost_text().is_some());
+
+        dialog.handle_key(key(KeyCode::End));
+        assert_eq!(dialog.new_group.value(), "personal");
+    }
+
+    #[test]
+    fn test_group_ghost_cleared_on_field_switch() {
+        let mut dialog =
+            RenameDialog::new("Test", "", "default", default_profiles(), sample_groups());
+        dialog.handle_key(key(KeyCode::Tab)); // Focus group field
+        dialog.handle_key(key(KeyCode::Char('p')));
+        assert!(dialog.group_ghost_text().is_some());
+
+        dialog.handle_key(key(KeyCode::Tab)); // Move to profile field
+        assert!(dialog.group_ghost_text().is_none());
+    }
+
+    #[test]
+    fn test_group_ghost_common_prefix_for_multiple_matches() {
+        let mut dialog =
+            RenameDialog::new("Test", "", "default", default_profiles(), sample_groups());
+        dialog.handle_key(key(KeyCode::Tab));
+        dialog.handle_key(key(KeyCode::Char('w')));
+        // "work" and "work/frontend" share common prefix "work"
+        // Ghost should show "ork" (common prefix minus typed "w")
+        assert_eq!(dialog.group_ghost_text(), Some("ork"));
+    }
+
+    #[test]
+    fn test_group_ghost_cleared_on_picker_select() {
+        let mut dialog =
+            RenameDialog::new("Test", "", "default", default_profiles(), sample_groups());
+        dialog.handle_key(key(KeyCode::Tab));
+        dialog.handle_key(key(KeyCode::Char('w')));
+        assert!(dialog.group_ghost_text().is_some());
+
+        dialog.handle_key(ctrl_p()); // Open picker
+        dialog.handle_key(key(KeyCode::Enter)); // Select "work"
+        assert!(dialog.group_ghost_text().is_none());
+        assert_eq!(dialog.new_group.value(), "work");
     }
 }

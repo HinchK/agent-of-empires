@@ -20,8 +20,9 @@ use crate::session::repo_config::HookProgress;
 use crate::session::Config;
 use crate::session::{civilizations, resolve_config};
 use crate::tmux::AvailableTools;
-use crate::tui::components::{DirPicker, DirPickerResult, ListPicker, ListPickerResult};
-use group_input::GroupGhostCompletion;
+use crate::tui::components::{
+    DirPicker, DirPickerResult, GroupGhostCompletion, ListPicker, ListPickerResult,
+};
 use path_input::PathGhostCompletion;
 
 pub(super) struct FieldHelp {
