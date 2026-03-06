@@ -48,8 +48,7 @@ pub fn is_pane_dead(session_name: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Returns the current command running in the session's active pane (e.g. "bash", "claude").
-pub fn pane_current_command(session_name: &str) -> Option<String> {
+fn pane_current_command(session_name: &str) -> Option<String> {
     Command::new("tmux")
         .args([
             "display-message",
@@ -65,17 +64,17 @@ pub fn pane_current_command(session_name: &str) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
-/// Shells that indicate the agent is not running (the pane was restored by
-/// tmux-resurrect, the agent crashed back to a prompt, or the user exited).
+// Shells that indicate the agent is not running (the pane was restored by
+// tmux-resurrect, the agent crashed back to a prompt, or the user exited).
 const KNOWN_SHELLS: &[&str] = &[
     "bash", "zsh", "sh", "fish", "dash", "ksh", "tcsh", "csh", "nu", "pwsh",
 ];
 
 fn is_shell_command(cmd: &str) -> bool {
-    KNOWN_SHELLS.contains(&cmd)
+    let normalized = cmd.strip_prefix('-').unwrap_or(cmd);
+    KNOWN_SHELLS.contains(&normalized)
 }
 
-/// Returns true if the pane is alive but running a plain shell instead of an agent.
 pub fn is_pane_running_shell(session_name: &str) -> bool {
     pane_current_command(session_name)
         .map(|cmd| is_shell_command(&cmd))
@@ -163,6 +162,16 @@ mod tests {
             assert!(
                 is_shell_command(shell),
                 "{shell} should be recognized as a shell"
+            );
+        }
+    }
+
+    #[test]
+    fn test_is_shell_command_recognizes_login_shells() {
+        for shell in ["-bash", "-zsh", "-sh", "-fish"] {
+            assert!(
+                is_shell_command(shell),
+                "{shell} should be recognized as a login shell"
             );
         }
     }
