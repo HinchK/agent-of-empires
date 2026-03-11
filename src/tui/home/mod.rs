@@ -99,8 +99,7 @@ pub struct HomeView {
     pub(super) collapsed_profiles: HashSet<String>,
     pub(super) instances: Vec<Instance>,
     pub(super) instance_map: HashMap<String, Instance>,
-    pub(super) groups: Vec<Group>,
-    pub(super) group_tree: GroupTree,
+    pub(super) group_trees: HashMap<String, GroupTree>,
     pub(super) flat_items: Vec<Item>,
 
     // UI state
@@ -186,7 +185,7 @@ impl HomeView {
 
         let mut storages = HashMap::new();
         let mut all_instances = Vec::new();
-        let mut all_groups = Vec::new();
+        let mut group_trees = HashMap::new();
 
         let profile_names = match &active_profile {
             Some(name) => vec![name.clone()],
@@ -199,8 +198,9 @@ impl HomeView {
             for inst in &mut instances {
                 inst.source_profile = profile_name.clone();
             }
+            let tree = GroupTree::new_with_groups(&instances, &groups);
+            group_trees.insert(profile_name.clone(), tree);
             all_instances.extend(instances);
-            all_groups.extend(groups);
             storages.insert(profile_name.clone(), storage);
         }
 
@@ -208,9 +208,8 @@ impl HomeView {
             .iter()
             .map(|i| (i.id.clone(), i.clone()))
             .collect();
-        let group_tree = GroupTree::new_with_groups(&all_instances, &all_groups);
 
-        // Use first profile for config resolution, or "default"
+        // In unified mode, config comes from "default" profile
         let config_profile = active_profile.as_deref().unwrap_or("default");
         let resolved = resolve_config(config_profile);
         let default_terminal_mode = resolved
@@ -232,9 +231,18 @@ impl HomeView {
 
         let collapsed_profiles = HashSet::new();
         let flat_items = if active_profile.is_none() {
-            flatten_tree_all_profiles(&all_instances, &all_groups, sort_order, &collapsed_profiles)
+            flatten_tree_all_profiles(
+                &all_instances,
+                &group_trees,
+                sort_order,
+                &collapsed_profiles,
+            )
         } else {
-            flatten_tree(&group_tree, &all_instances, sort_order)
+            let tree = active_profile.as_ref().and_then(|p| group_trees.get(p));
+            match tree {
+                Some(t) => flatten_tree(t, &all_instances, sort_order),
+                None => Vec::new(),
+            }
         };
 
         let mut view = Self {
@@ -243,8 +251,7 @@ impl HomeView {
             collapsed_profiles,
             instances: all_instances,
             instance_map,
-            groups: all_groups,
-            group_tree,
+            group_trees,
             flat_items,
             cursor: 0,
             selected_session: None,
@@ -298,7 +305,6 @@ impl HomeView {
         use crate::session::list_profiles;
 
         let mut all_instances = Vec::new();
-        let mut all_groups = Vec::new();
 
         // Re-discover profiles in "all" mode
         if self.active_profile.is_none() {
@@ -322,9 +328,23 @@ impl HomeView {
                     inst.last_start_time = prev.last_start_time;
                 }
             }
+            // Rebuild this profile's tree from disk, preserving any collapsed
+            // state that was toggled in-memory but not yet on disk
+            let mut new_tree = GroupTree::new_with_groups(&instances, &groups);
+            if let Some(old_tree) = self.group_trees.get(profile_name) {
+                for g in old_tree.get_all_groups() {
+                    if g.collapsed {
+                        new_tree.set_collapsed(&g.path, true);
+                    }
+                }
+            }
+            self.group_trees.insert(profile_name.clone(), new_tree);
             all_instances.extend(instances);
-            all_groups.extend(groups);
         }
+
+        // Remove trees for profiles that no longer exist
+        let storage_keys: Vec<String> = self.storages.keys().cloned().collect();
+        self.group_trees.retain(|k, _| storage_keys.contains(k));
 
         self.instances = all_instances;
         self.instance_map = self
@@ -332,8 +352,6 @@ impl HomeView {
             .iter()
             .map(|i| (i.id.clone(), i.clone()))
             .collect();
-        self.groups = all_groups;
-        self.group_tree = GroupTree::new_with_groups(&self.instances, &self.groups);
         self.flat_items = self.build_flat_items();
 
         if self.cursor >= self.flat_items.len() && !self.flat_items.is_empty() {
@@ -404,7 +422,7 @@ impl HomeView {
             if result.success {
                 self.instances.retain(|i| i.id != result.session_id);
                 self.instance_map.remove(&result.session_id);
-                self.group_tree = GroupTree::new_with_groups(&self.instances, &self.groups);
+                self.rebuild_group_trees();
 
                 if let Err(e) = self.save() {
                     tracing::error!("Failed to save after deletion: {}", e);
@@ -503,9 +521,11 @@ impl HomeView {
                 }
 
                 self.instances.push(instance.clone());
-                self.group_tree = GroupTree::new_with_groups(&self.instances, &self.groups);
+                self.rebuild_group_trees();
                 if !instance.group_path.is_empty() {
-                    self.group_tree.create_group(&instance.group_path);
+                    if let Some(tree) = self.group_trees.get_mut(&target_profile) {
+                        tree.create_group(&instance.group_path);
+                    }
                 }
 
                 if let Err(e) = self.save() {
@@ -616,12 +636,19 @@ impl HomeView {
         if self.active_profile.is_none() {
             flatten_tree_all_profiles(
                 &self.instances,
-                &self.groups,
+                &self.group_trees,
                 self.sort_order,
                 &self.collapsed_profiles,
             )
         } else {
-            flatten_tree(&self.group_tree, &self.instances, self.sort_order)
+            match self
+                .active_profile
+                .as_ref()
+                .and_then(|p| self.group_trees.get(p))
+            {
+                Some(tree) => flatten_tree(tree, &self.instances, self.sort_order),
+                None => Vec::new(),
+            }
         }
     }
 
@@ -675,9 +702,6 @@ impl HomeView {
     }
 
     pub fn save(&self) -> anyhow::Result<()> {
-        // Get current collapsed state from the live group tree
-        let all_groups_with_state = self.group_tree.get_all_groups();
-
         for (profile_name, storage) in &self.storages {
             let profile_instances: Vec<Instance> = self
                 .instances
@@ -685,20 +709,51 @@ impl HomeView {
                 .filter(|i| i.source_profile == *profile_name)
                 .cloned()
                 .collect();
-            // Use groups with their current collapsed state
-            let profile_groups: Vec<Group> = all_groups_with_state
-                .iter()
-                .filter(|g| {
-                    profile_instances.iter().any(|i| {
-                        i.group_path == g.path || i.group_path.starts_with(&format!("{}/", g.path))
-                    })
-                })
+            // Each profile has its own GroupTree with correct collapsed state
+            let tree = self
+                .group_trees
+                .get(profile_name)
                 .cloned()
-                .collect();
-            let profile_tree = GroupTree::new_with_groups(&profile_instances, &profile_groups);
-            storage.save_with_groups(&profile_instances, &profile_tree)?;
+                .unwrap_or_else(|| GroupTree::new_with_groups(&profile_instances, &[]));
+            storage.save_with_groups(&profile_instances, &tree)?;
         }
         Ok(())
+    }
+
+    /// Rebuild all per-profile GroupTrees from the current instances,
+    /// preserving each tree's collapsed state.
+    pub(super) fn rebuild_group_trees(&mut self) {
+        for (profile_name, tree) in &mut self.group_trees {
+            let existing_groups = tree.get_all_groups();
+            let profile_instances: Vec<Instance> = self
+                .instances
+                .iter()
+                .filter(|i| i.source_profile == *profile_name)
+                .cloned()
+                .collect();
+            *tree = GroupTree::new_with_groups(&profile_instances, &existing_groups);
+        }
+    }
+
+    /// Determine which profile the item at the given cursor position belongs to.
+    pub(super) fn profile_for_cursor(&self, cursor: usize) -> Option<String> {
+        if let Some(profile) = &self.active_profile {
+            return Some(profile.clone());
+        }
+        for i in (0..=cursor).rev() {
+            if let Some(Item::ProfileHeader { name, .. }) = self.flat_items.get(i) {
+                return Some(name.clone());
+            }
+        }
+        None
+    }
+
+    /// Collect all groups from all per-profile GroupTrees.
+    pub(super) fn all_groups(&self) -> Vec<Group> {
+        self.group_trees
+            .values()
+            .flat_map(|t| t.get_all_groups())
+            .collect()
     }
 
     /// Centralized instance mutation: applies `f` once to the `instances` vec

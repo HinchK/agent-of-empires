@@ -441,12 +441,8 @@ impl HomeView {
                 } else {
                     let existing_titles: Vec<String> =
                         self.instances.iter().map(|i| i.title.clone()).collect();
-                    let existing_groups: Vec<String> = self
-                        .group_tree
-                        .get_all_groups()
-                        .iter()
-                        .map(|g| g.path.clone())
-                        .collect();
+                    let existing_groups: Vec<String> =
+                        self.all_groups().iter().map(|g| g.path.clone()).collect();
                     let current_profile = self
                         .active_profile
                         .clone()
@@ -607,12 +603,8 @@ impl HomeView {
                             .unwrap_or_else(|| "default".to_string());
                         let profiles =
                             list_profiles().unwrap_or_else(|_| vec![current_profile.clone()]);
-                        let existing_groups: Vec<String> = self
-                            .group_tree
-                            .get_all_groups()
-                            .iter()
-                            .map(|g| g.path.clone())
-                            .collect();
+                        let existing_groups: Vec<String> =
+                            self.all_groups().iter().map(|g| g.path.clone()).collect();
                         self.rename_dialog = Some(RenameDialog::new(
                             &inst.title,
                             &inst.group_path,
@@ -763,9 +755,11 @@ impl HomeView {
                     self.selected_session = None;
                     self.selected_group = Some(path.clone());
                 }
-                Item::ProfileHeader { name, .. } => {
+                Item::ProfileHeader { .. } => {
+                    // Profile headers are not groups -- don't set selected_group
+                    // so that group operations (delete, etc.) are not triggered.
                     self.selected_session = None;
-                    self.selected_group = Some(name.clone());
+                    self.selected_group = None;
                 }
             }
         }
@@ -789,7 +783,13 @@ impl HomeView {
     }
 
     fn toggle_group_collapsed(&mut self, path: &str) {
-        self.group_tree.toggle_collapsed(path);
+        // Route to the correct profile's GroupTree
+        let profile = self.profile_for_cursor(self.cursor);
+        if let Some(profile) = profile {
+            if let Some(tree) = self.group_trees.get_mut(&profile) {
+                tree.toggle_collapsed(path);
+            }
+        }
         self.flat_items = self.build_flat_items();
         if let Err(e) = self.save() {
             tracing::error!("Failed to save group state: {}", e);

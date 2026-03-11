@@ -105,6 +105,9 @@ pub fn create_profile(name: &str) -> Result<()> {
     if name.contains('/') || name.contains('\\') {
         anyhow::bail!("Profile name cannot contain path separators");
     }
+    if name.eq_ignore_ascii_case("all") {
+        anyhow::bail!("Profile name 'all' is reserved");
+    }
 
     let profiles = list_profiles()?;
     if profiles.contains(&name.to_string()) {

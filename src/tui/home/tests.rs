@@ -997,16 +997,27 @@ fn test_delete_selected_group_updates_groups_field() {
     }
 
     assert!(env.view.selected_group.is_some());
-    assert!(env.view.group_tree.group_exists("work"));
+    assert!(env
+        .view
+        .group_trees
+        .get("test")
+        .unwrap()
+        .group_exists("work"));
 
     // Delete the group (this moves sessions to default)
     env.view.delete_selected_group().unwrap();
 
     // Verify the group is removed from group_tree
-    assert!(!env.view.group_tree.group_exists("work"));
+    assert!(!env
+        .view
+        .group_trees
+        .get("test")
+        .unwrap()
+        .group_exists("work"));
 
     // Verify self.groups is updated (this is the bug fix)
-    let group_paths: Vec<_> = env.view.groups.iter().map(|g| g.path.as_str()).collect();
+    let all_groups = env.view.all_groups();
+    let group_paths: Vec<_> = all_groups.iter().map(|g| g.path.as_str()).collect();
     assert!(!group_paths.contains(&"work"));
     assert!(!group_paths.contains(&"work/projects"));
 }
@@ -1044,11 +1055,22 @@ fn test_delete_group_with_sessions_updates_groups_field() {
     env.view.delete_group_with_sessions(&options).unwrap();
 
     // Verify the group is removed from group_tree
-    assert!(!env.view.group_tree.group_exists("work"));
-    assert!(!env.view.group_tree.group_exists("work/projects"));
+    assert!(!env
+        .view
+        .group_trees
+        .get("test")
+        .unwrap()
+        .group_exists("work"));
+    assert!(!env
+        .view
+        .group_trees
+        .get("test")
+        .unwrap()
+        .group_exists("work/projects"));
 
     // Verify self.groups is updated (this is the bug fix)
-    let group_paths: Vec<_> = env.view.groups.iter().map(|g| g.path.as_str()).collect();
+    let all_groups = env.view.all_groups();
+    let group_paths: Vec<_> = all_groups.iter().map(|g| g.path.as_str()).collect();
     assert!(!group_paths.contains(&"work"));
     assert!(!group_paths.contains(&"work/projects"));
 
@@ -1109,7 +1131,7 @@ fn test_delete_group_with_sessions_respects_worktree_option() {
 
     // We can't easily verify the deletion request was sent with the right flags
     // without mocking, but we can verify the group was deleted
-    assert!(!view.group_tree.group_exists("work"));
+    assert!(!view.group_trees.get("test").unwrap().group_exists("work"));
 }
 
 #[test]
@@ -1155,7 +1177,7 @@ fn test_delete_group_with_sessions_respects_container_option() {
     view.delete_group_with_sessions(&options).unwrap();
 
     // Verify the group was deleted
-    assert!(!view.group_tree.group_exists("work"));
+    assert!(!view.group_trees.get("test").unwrap().group_exists("work"));
 }
 
 #[test]
@@ -1177,7 +1199,12 @@ fn test_delete_group_includes_nested_groups() {
     }
 
     // Verify nested group exists
-    assert!(env.view.group_tree.group_exists("work/projects"));
+    assert!(env
+        .view
+        .group_trees
+        .get("test")
+        .unwrap()
+        .group_exists("work/projects"));
 
     // Delete the group with all sessions
     let options = GroupDeleteOptions {
@@ -1190,8 +1217,18 @@ fn test_delete_group_includes_nested_groups() {
     env.view.delete_group_with_sessions(&options).unwrap();
 
     // Verify both parent and nested groups are removed
-    assert!(!env.view.group_tree.group_exists("work"));
-    assert!(!env.view.group_tree.group_exists("work/projects"));
+    assert!(!env
+        .view
+        .group_trees
+        .get("test")
+        .unwrap()
+        .group_exists("work"));
+    assert!(!env
+        .view
+        .group_trees
+        .get("test")
+        .unwrap()
+        .group_exists("work/projects"));
 }
 
 #[test]
@@ -1200,7 +1237,7 @@ fn test_groups_field_stays_in_sync_with_storage() {
     let mut env = create_test_env_with_group_sessions();
 
     // Get initial group count
-    let initial_group_count = env.view.groups.len();
+    let initial_group_count = env.view.all_groups().len();
     assert!(initial_group_count > 0);
 
     // Select and delete the work group
@@ -1217,14 +1254,21 @@ fn test_groups_field_stays_in_sync_with_storage() {
     env.view.delete_selected_group().unwrap();
 
     // After deletion, groups field should be smaller
-    assert!(env.view.groups.len() < initial_group_count);
+    assert!(env.view.all_groups().len() < initial_group_count);
 
     // Reload from storage and verify groups match
     env.view.reload().unwrap();
-    let reloaded_groups: Vec<_> = env.view.groups.iter().map(|g| g.path.clone()).collect();
+    let reloaded_groups: Vec<_> = env
+        .view
+        .all_groups()
+        .iter()
+        .map(|g| g.path.clone())
+        .collect();
     let tree_groups: Vec<_> = env
         .view
-        .group_tree
+        .group_trees
+        .get("test")
+        .unwrap()
         .get_all_groups()
         .iter()
         .map(|g| g.path.clone())
@@ -1770,5 +1814,147 @@ fn test_create_session_in_all_mode_is_findable() {
     assert_eq!(
         view.get_instance(&session_id).unwrap().source_profile,
         "alpha"
+    );
+}
+
+#[test]
+#[serial]
+fn test_save_preserves_per_profile_collapsed_state() {
+    use crate::session::GroupTree;
+
+    let temp = TempDir::new().unwrap();
+    setup_test_home(&temp);
+
+    // Create alpha with group "work" (collapsed)
+    let storage_a = Storage::new("alpha").unwrap();
+    let mut inst_a = Instance::new("A1", "/tmp/a");
+    inst_a.group_path = "work".to_string();
+    let mut tree_a = GroupTree::new_with_groups(&[inst_a.clone()], &[]);
+    tree_a.toggle_collapsed("work");
+    storage_a.save_with_groups(&[inst_a], &tree_a).unwrap();
+
+    // Create beta with group "work" (expanded, the default)
+    let storage_b = Storage::new("beta").unwrap();
+    let mut inst_b = Instance::new("B1", "/tmp/b");
+    inst_b.group_path = "work".to_string();
+    let tree_b = GroupTree::new_with_groups(&[inst_b.clone()], &[]);
+    storage_b.save_with_groups(&[inst_b], &tree_b).unwrap();
+
+    // Load unified view
+    let tools = AvailableTools::with_tools(&["claude"]);
+    let view = HomeView::new(None, tools).unwrap();
+
+    // Verify per-profile collapsed state is preserved
+    let alpha_tree = view.group_trees.get("alpha").unwrap();
+    let alpha_work = alpha_tree
+        .get_all_groups()
+        .into_iter()
+        .find(|g| g.path == "work")
+        .expect("alpha should have work group");
+    assert!(
+        alpha_work.collapsed,
+        "alpha's 'work' group should be collapsed"
+    );
+
+    let beta_tree = view.group_trees.get("beta").unwrap();
+    let beta_work = beta_tree
+        .get_all_groups()
+        .into_iter()
+        .find(|g| g.path == "work")
+        .expect("beta should have work group");
+    assert!(
+        !beta_work.collapsed,
+        "beta's 'work' group should be expanded"
+    );
+
+    // Save and reload to verify persistence
+    view.save().unwrap();
+
+    // Reload from disk and verify alpha's collapsed state survived
+    let (_, groups_a) = storage_a.load_with_groups().unwrap();
+    let saved_a = groups_a
+        .iter()
+        .find(|g| g.path == "work")
+        .expect("alpha should still have work group on disk");
+    assert!(
+        saved_a.collapsed,
+        "alpha's 'work' collapsed state should persist to disk"
+    );
+
+    let (_, groups_b) = storage_b.load_with_groups().unwrap();
+    let saved_b = groups_b
+        .iter()
+        .find(|g| g.path == "work")
+        .expect("beta should still have work group on disk");
+    assert!(
+        !saved_b.collapsed,
+        "beta's 'work' expanded state should persist to disk"
+    );
+}
+
+#[test]
+#[serial]
+fn test_create_profile_rejects_reserved_name_all() {
+    let temp = TempDir::new().unwrap();
+    setup_test_home(&temp);
+    let _storage = Storage::new("default").unwrap();
+
+    let result = crate::session::create_profile("all");
+    assert!(result.is_err());
+    assert!(
+        result.unwrap_err().to_string().contains("reserved"),
+        "error should mention 'reserved'"
+    );
+
+    // Case-insensitive
+    let result = crate::session::create_profile("ALL");
+    assert!(result.is_err());
+}
+
+#[test]
+#[serial]
+fn test_profile_header_does_not_trigger_group_delete() {
+    let temp = TempDir::new().unwrap();
+    setup_test_home(&temp);
+
+    let storage_a = Storage::new("alpha").unwrap();
+    storage_a.save(&[Instance::new("A1", "/tmp/a")]).unwrap();
+
+    let storage_b = Storage::new("beta").unwrap();
+    storage_b.save(&[Instance::new("B1", "/tmp/b")]).unwrap();
+
+    let tools = AvailableTools::with_tools(&["claude"]);
+    let mut view = HomeView::new(None, tools).unwrap();
+
+    // Move cursor to a ProfileHeader
+    let header_idx = view
+        .flat_items
+        .iter()
+        .position(|item| matches!(item, Item::ProfileHeader { .. }))
+        .expect("should have a profile header");
+    view.cursor = header_idx;
+    view.update_selected();
+
+    // selected_group should be None for profile headers
+    assert!(
+        view.selected_group.is_none(),
+        "profile header should not set selected_group"
+    );
+    // selected_session should also be None
+    assert!(view.selected_session.is_none());
+
+    // Pressing 'd' on a profile header should not open any delete dialog
+    view.handle_key(key(KeyCode::Char('d')));
+    assert!(
+        view.unified_delete_dialog.is_none(),
+        "no delete dialog should open on profile header"
+    );
+    assert!(
+        view.group_delete_options_dialog.is_none(),
+        "no group delete dialog should open on profile header"
+    );
+    assert!(
+        view.confirm_dialog.is_none(),
+        "no confirm dialog should open on profile header"
     );
 }

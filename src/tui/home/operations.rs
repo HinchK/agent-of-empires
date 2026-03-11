@@ -47,9 +47,11 @@ impl HomeView {
         }
 
         self.instances.push(instance.clone());
-        self.group_tree = GroupTree::new_with_groups(&self.instances, &self.groups);
+        self.rebuild_group_trees();
         if !instance.group_path.is_empty() {
-            self.group_tree.create_group(&instance.group_path);
+            if let Some(tree) = self.group_trees.get_mut(&target_profile) {
+                tree.create_group(&instance.group_path);
+            }
         }
         self.save()?;
 
@@ -87,8 +89,11 @@ impl HomeView {
                 }
             }
 
-            self.group_tree = GroupTree::new_with_groups(&self.instances, &self.groups);
-            self.group_tree.delete_group(&group_path);
+            self.rebuild_group_trees();
+            // Delete the group from whichever profile's tree contains it
+            for tree in self.group_trees.values_mut() {
+                tree.delete_group(&group_path);
+            }
             self.save()?;
 
             self.reload()?;
@@ -141,8 +146,9 @@ impl HomeView {
                 }
             }
 
-            self.group_tree.delete_group(&group_path);
-            self.groups = self.group_tree.get_all_groups();
+            for tree in self.group_trees.values_mut() {
+                tree.delete_group(&group_path);
+            }
             self.save()?;
             self.flat_items = self.build_flat_items();
         }
@@ -250,9 +256,18 @@ impl HomeView {
                         inst.source_profile = instance.source_profile.clone();
                     });
 
-                    self.group_tree = GroupTree::new_with_groups(&self.instances, &self.groups);
+                    self.rebuild_group_trees();
                     if !effective_group.is_empty() {
-                        self.group_tree.create_group(&effective_group);
+                        // Ensure group tree exists for the target profile
+                        if !self.group_trees.contains_key(target_profile) {
+                            self.group_trees.insert(
+                                target_profile.to_string(),
+                                GroupTree::new_with_groups(&[], &[]),
+                            );
+                        }
+                        if let Some(tree) = self.group_trees.get_mut(target_profile) {
+                            tree.create_group(&effective_group);
+                        }
                     }
                     self.save()?;
                     self.reload()?;
@@ -284,10 +299,20 @@ impl HomeView {
                 inst.group_path = effective_group.clone();
             });
 
-            // Rebuild group tree and create group if needed
-            self.group_tree = GroupTree::new_with_groups(&self.instances, &self.groups);
+            // Rebuild group trees and create group if needed
+            self.rebuild_group_trees();
             if !effective_group.is_empty() {
-                self.group_tree.create_group(&effective_group);
+                let profile = self
+                    .get_instance(&id)
+                    .map(|i| i.source_profile.clone())
+                    .unwrap_or_else(|| {
+                        self.active_profile
+                            .clone()
+                            .unwrap_or_else(|| "default".to_string())
+                    });
+                if let Some(tree) = self.group_trees.get_mut(&profile) {
+                    tree.create_group(&effective_group);
+                }
             }
             self.save()?;
 
