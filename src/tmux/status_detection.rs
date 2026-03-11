@@ -30,10 +30,118 @@ pub fn detect_claude_status(_content: &str) -> Status {
     Status::Idle
 }
 
-/// OpenCode status is detected via hooks (plugin-based), not tmux pane parsing.
-/// This stub exists so the agent registry has a valid function pointer; it only
-/// runs when hooks haven't written a status file yet (e.g. first few seconds).
-pub fn detect_opencode_status(_content: &str) -> Status {
+/// OpenCode status detection via tmux pane parsing.
+/// This serves as a fallback when the plugin-based hook hasn't written a status
+/// file yet (e.g. first few seconds after launch, or if the plugin fails to load).
+/// When hooks are working, `update_status()` reads the hook file first and skips this.
+pub fn detect_opencode_status(raw_content: &str) -> Status {
+    let content = raw_content.to_lowercase();
+    let lines: Vec<&str> = content.lines().collect();
+    let non_empty_lines: Vec<&str> = lines
+        .iter()
+        .filter(|l| !l.trim().is_empty())
+        .copied()
+        .collect();
+
+    let last_lines: String = non_empty_lines
+        .iter()
+        .rev()
+        .take(30)
+        .rev()
+        .copied()
+        .collect::<Vec<&str>>()
+        .join("\n");
+    let last_lines_lower = last_lines.to_lowercase();
+
+    // RUNNING: OpenCode shows "esc to interrupt" when busy (same as Claude Code)
+    if last_lines_lower.contains("esc to interrupt") || last_lines_lower.contains("esc interrupt") {
+        return Status::Running;
+    }
+
+    for line in &lines {
+        for spinner in SPINNER_CHARS {
+            if line.contains(spinner) {
+                return Status::Running;
+            }
+        }
+    }
+
+    // WAITING: Selection menus (shows "Enter to select" or "Esc to cancel")
+    if last_lines_lower.contains("enter to select") || last_lines_lower.contains("esc to cancel") {
+        return Status::Waiting;
+    }
+
+    // WAITING: Permission/confirmation prompts
+    let permission_prompts = [
+        "(y/n)",
+        "[y/n]",
+        "continue?",
+        "proceed?",
+        "approve",
+        "allow",
+    ];
+    for prompt in &permission_prompts {
+        if last_lines_lower.contains(prompt) {
+            return Status::Waiting;
+        }
+    }
+
+    for line in &lines {
+        let trimmed = line.trim();
+        if trimmed.starts_with("❯") && trimmed.len() > 2 {
+            let after_cursor = trimmed.get(3..).unwrap_or("").trim_start();
+            if after_cursor.starts_with("1.")
+                || after_cursor.starts_with("2.")
+                || after_cursor.starts_with("3.")
+            {
+                return Status::Waiting;
+            }
+        }
+    }
+    if lines.iter().any(|line| {
+        line.contains("❯") && (line.contains(" 1.") || line.contains(" 2.") || line.contains(" 3."))
+    }) {
+        return Status::Waiting;
+    }
+
+    for line in non_empty_lines.iter().rev().take(10) {
+        let clean_line = strip_ansi(line).trim().to_string();
+
+        if clean_line == ">" || clean_line == "> " || clean_line == ">>" {
+            return Status::Waiting;
+        }
+        if clean_line.starts_with("> ")
+            && !clean_line.to_lowercase().contains("esc")
+            && clean_line.len() < 100
+        {
+            return Status::Waiting;
+        }
+    }
+
+    // WAITING: Completion indicators + input prompt nearby
+    let completion_indicators = [
+        "complete",
+        "done",
+        "finished",
+        "ready",
+        "what would you like",
+        "what else",
+        "anything else",
+        "how can i help",
+        "let me know",
+    ];
+    let has_completion = completion_indicators
+        .iter()
+        .any(|ind| last_lines_lower.contains(ind));
+    if has_completion {
+        for line in non_empty_lines.iter().rev().take(10) {
+            let clean = strip_ansi(line).trim().to_string();
+            if clean == ">" || clean == "> " || clean == ">>" {
+                return Status::Waiting;
+            }
+        }
+    }
+
     Status::Idle
 }
 
@@ -363,10 +471,68 @@ mod tests {
 
     #[test]
     fn test_hook_based_stubs_return_idle() {
-        // Claude/Cursor/OpenCode use hook-based detection; the stubs always return Idle
+        // Claude/Cursor use hook-based detection; the stubs always return Idle
         assert_eq!(detect_claude_status("anything"), Status::Idle);
         assert_eq!(detect_cursor_status("anything"), Status::Idle);
-        assert_eq!(detect_opencode_status("anything"), Status::Idle);
+    }
+
+    #[test]
+    fn test_detect_opencode_status_running() {
+        assert_eq!(
+            detect_opencode_status("Processing your request\nesc to interrupt"),
+            Status::Running
+        );
+        assert_eq!(
+            detect_opencode_status("Working... esc interrupt"),
+            Status::Running
+        );
+        assert_eq!(detect_opencode_status("Generating ⠋"), Status::Running);
+        assert_eq!(detect_opencode_status("Loading ⠹"), Status::Running);
+    }
+
+    #[test]
+    fn test_detect_opencode_status_waiting() {
+        assert_eq!(
+            detect_opencode_status("allow this action? [y/n]"),
+            Status::Waiting
+        );
+        assert_eq!(detect_opencode_status("continue? (y/n)"), Status::Waiting);
+        assert_eq!(detect_opencode_status("approve changes"), Status::Waiting);
+        assert_eq!(detect_opencode_status("task complete.\n>"), Status::Waiting);
+        assert_eq!(
+            detect_opencode_status("ready for input\n> "),
+            Status::Waiting
+        );
+        assert_eq!(
+            detect_opencode_status("done! what else can i help with?\n>"),
+            Status::Waiting
+        );
+    }
+
+    #[test]
+    fn test_detect_opencode_status_idle() {
+        assert_eq!(detect_opencode_status("some random output"), Status::Idle);
+        assert_eq!(
+            detect_opencode_status("file saved successfully"),
+            Status::Idle
+        );
+    }
+
+    #[test]
+    fn test_detect_opencode_status_numbered_selection() {
+        let content = "Select:\n❯ 1. Option A\n  2. Option B";
+        assert_eq!(detect_opencode_status(content), Status::Waiting);
+    }
+
+    #[test]
+    fn test_detect_opencode_status_completion_with_prompt() {
+        let content = "Task complete! What else can I help with?\n>";
+        assert_eq!(detect_opencode_status(content), Status::Waiting);
+    }
+
+    #[test]
+    fn test_detect_opencode_status_double_prompt() {
+        assert_eq!(detect_opencode_status("Ready\n>>"), Status::Waiting);
     }
 
     #[test]
