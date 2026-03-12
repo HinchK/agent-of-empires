@@ -1,13 +1,14 @@
 ---
-skill: aoe
-version: "0.15"
+name: aoe
 description: Manage AI coding agent sessions via Agent of Empires (aoe)
-triggers:
-  - aoe
-  - agent-of-empires
-  - coding agents
-  - tmux sessions
-  - parallel agents
+version: 0.15.1
+metadata:
+  openclaw:
+    requires:
+      bins:
+        - aoe
+        - tmux
+    homepage: https://github.com/njbrake/agent-of-empires
 ---
 
 # Agent of Empires (aoe) Skill
