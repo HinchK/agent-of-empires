@@ -106,6 +106,8 @@ pub struct HomeView {
     pub(super) cursor: usize,
     pub(super) selected_session: Option<String>,
     pub(super) selected_group: Option<String>,
+    /// Which profile the selected group belongs to (for scoped group operations)
+    pub(super) selected_group_profile: Option<String>,
     pub(super) view_mode: ViewMode,
     pub(super) sort_order: SortOrder,
 
@@ -256,6 +258,7 @@ impl HomeView {
             cursor: 0,
             selected_session: None,
             selected_group: None,
+            selected_group_profile: None,
             view_mode: ViewMode::default(),
             sort_order,
             show_help: false,
@@ -628,32 +631,51 @@ impl HomeView {
         self.instance_map.get(id)
     }
 
-    pub fn available_tools(&self) -> AvailableTools {
-        self.available_tools.clone()
-    }
-
     pub(super) fn build_flat_items(&self) -> Vec<Item> {
-        if self.active_profile.is_none() {
+        if let Some(profile) = &self.active_profile {
+            // Filtered to a single profile
+            match self.group_trees.get(profile) {
+                Some(tree) => flatten_tree(tree, &self.instances, self.sort_order),
+                None => Vec::new(),
+            }
+        } else if self.storages.len() <= 1 {
+            // All-profiles mode with only one profile -- skip the profile header
+            match self.group_trees.values().next() {
+                Some(tree) => flatten_tree(tree, &self.instances, self.sort_order),
+                None => Vec::new(),
+            }
+        } else {
             flatten_tree_all_profiles(
                 &self.instances,
                 &self.group_trees,
                 self.sort_order,
                 &self.collapsed_profiles,
             )
-        } else {
-            match self
-                .active_profile
-                .as_ref()
-                .and_then(|p| self.group_trees.get(p))
-            {
-                Some(tree) => flatten_tree(tree, &self.instances, self.sort_order),
-                None => Vec::new(),
-            }
         }
     }
 
     pub fn active_profile_display(&self) -> &str {
         self.active_profile.as_deref().unwrap_or("all")
+    }
+
+    /// Switch the active profile filter in-place without destroying the view.
+    /// Pass `None` for all-profiles mode, or `Some(name)` to filter to one profile.
+    pub fn switch_profile(&mut self, new_profile: Option<String>) -> anyhow::Result<()> {
+        self.active_profile = new_profile;
+        self.reload()?;
+        self.refresh_from_config();
+        // Invalidate preview caches since the visible sessions changed
+        self.preview_cache = PreviewCache::default();
+        self.terminal_preview_cache = PreviewCache::default();
+        self.container_terminal_preview_cache = PreviewCache::default();
+        // Clear search since match indices are invalid with new flat_items
+        if self.search_active {
+            self.search_active = false;
+            self.search_query = Input::default();
+            self.search_matches.clear();
+            self.search_match_index = 0;
+        }
+        Ok(())
     }
 
     /// Show the profile picker dialog with fresh data from disk.
@@ -754,6 +776,13 @@ impl HomeView {
             .values()
             .flat_map(|t| t.get_all_groups())
             .collect()
+    }
+
+    /// Check if any profile has groups, without collecting them all.
+    pub(super) fn has_any_groups(&self) -> bool {
+        self.group_trees
+            .values()
+            .any(|t| !t.get_all_groups().is_empty())
     }
 
     /// Centralized instance mutation: applies `f` once to the `instances` vec

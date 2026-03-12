@@ -772,15 +772,15 @@ fn test_uppercase_p_picker_switch_profile() {
     assert!(view.profile_picker_dialog.is_some());
 
     // In filtered mode, "all" is at top, then "first", "second", "test"
-    // Navigate down twice to reach "second"
+    // Navigate down to reach "second" and select it
     view.handle_key(key(KeyCode::Down));
     view.handle_key(key(KeyCode::Down));
     view.handle_key(key(KeyCode::Down));
     let action = view.handle_key(key(KeyCode::Enter));
-    assert_eq!(
-        action,
-        Some(Action::SwitchProfile(Some("second".to_string())))
-    );
+    // Profile switch is handled internally, no Action returned
+    assert_eq!(action, None);
+    assert_eq!(view.active_profile, Some("second".to_string()));
+    assert!(view.profile_picker_dialog.is_none());
 }
 
 #[test]
@@ -1956,5 +1956,90 @@ fn test_profile_header_does_not_trigger_group_delete() {
     assert!(
         view.confirm_dialog.is_none(),
         "no confirm dialog should open on profile header"
+    );
+}
+
+#[test]
+#[serial]
+fn test_delete_group_scoped_to_owning_profile() {
+    use crate::session::GroupTree;
+
+    let temp = TempDir::new().unwrap();
+    setup_test_home(&temp);
+
+    // Create alpha with group "work"
+    let storage_a = Storage::new("alpha").unwrap();
+    let mut inst_a = Instance::new("A1", "/tmp/a");
+    inst_a.group_path = "work".to_string();
+    let tree_a = GroupTree::new_with_groups(&[inst_a.clone()], &[]);
+    storage_a.save_with_groups(&[inst_a], &tree_a).unwrap();
+
+    // Create beta with the same group name "work"
+    let storage_b = Storage::new("beta").unwrap();
+    let mut inst_b = Instance::new("B1", "/tmp/b");
+    inst_b.group_path = "work".to_string();
+    let tree_b = GroupTree::new_with_groups(&[inst_b.clone()], &[]);
+    storage_b.save_with_groups(&[inst_b], &tree_b).unwrap();
+
+    let tools = AvailableTools::with_tools(&["claude"]);
+    let mut view = HomeView::new(None, tools).unwrap();
+
+    // Both profiles should have a "work" group
+    assert!(view.group_trees.get("alpha").unwrap().group_exists("work"));
+    assert!(view.group_trees.get("beta").unwrap().group_exists("work"));
+
+    // Find the "work" group under "alpha" profile header and select it
+    let mut alpha_found = false;
+    for (idx, item) in view.flat_items.iter().enumerate() {
+        match item {
+            Item::ProfileHeader { name, .. } if name == "alpha" => {
+                alpha_found = true;
+            }
+            Item::ProfileHeader { .. } => {
+                alpha_found = false;
+            }
+            Item::Group { path, .. } if alpha_found && path == "work" => {
+                view.cursor = idx;
+                view.update_selected();
+                break;
+            }
+            _ => {}
+        }
+    }
+
+    assert_eq!(view.selected_group.as_deref(), Some("work"));
+    assert_eq!(view.selected_group_profile.as_deref(), Some("alpha"));
+
+    // Delete alpha's "work" group
+    view.delete_selected_group().unwrap();
+
+    // Alpha's "work" group should be gone, but beta's should remain
+    assert!(
+        !view.group_trees.get("alpha").unwrap().group_exists("work"),
+        "alpha's 'work' group should be deleted"
+    );
+    assert!(
+        view.group_trees.get("beta").unwrap().group_exists("work"),
+        "beta's 'work' group should be untouched"
+    );
+
+    // Alpha's instance should be ungrouped, beta's should still be in "work"
+    let alpha_inst = view
+        .instances
+        .iter()
+        .find(|i| i.source_profile == "alpha")
+        .unwrap();
+    assert_eq!(
+        alpha_inst.group_path, "",
+        "alpha's instance should be ungrouped"
+    );
+    let beta_inst = view
+        .instances
+        .iter()
+        .find(|i| i.source_profile == "beta")
+        .unwrap();
+    assert_eq!(
+        beta_inst.group_path, "work",
+        "beta's instance should still be in 'work'"
     );
 }

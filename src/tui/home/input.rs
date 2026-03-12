@@ -331,12 +331,18 @@ impl HomeView {
                         } else {
                             Some(name)
                         };
-                        return Some(Action::SwitchProfile(profile));
+                        if let Err(e) = self.switch_profile(profile) {
+                            tracing::error!("Failed to switch profile: {}", e);
+                        }
                     }
                     ProfilePickerAction::Created(name) => {
                         self.profile_picker_dialog = None;
                         match crate::session::create_profile(&name) {
-                            Ok(()) => return Some(Action::SwitchProfile(Some(name))),
+                            Ok(()) => {
+                                if let Err(e) = self.switch_profile(Some(name)) {
+                                    tracing::error!("Failed to switch to new profile: {}", e);
+                                }
+                            }
                             Err(e) => {
                                 self.info_dialog = Some(InfoDialog::new(
                                     "Error",
@@ -750,16 +756,19 @@ impl HomeView {
                 Item::Session { id, .. } => {
                     self.selected_session = Some(id.clone());
                     self.selected_group = None;
+                    self.selected_group_profile = None;
                 }
                 Item::Group { path, .. } => {
                     self.selected_session = None;
                     self.selected_group = Some(path.clone());
+                    self.selected_group_profile = self.profile_for_cursor(self.cursor);
                 }
                 Item::ProfileHeader { .. } => {
                     // Profile headers are not groups -- don't set selected_group
                     // so that group operations (delete, etc.) are not triggered.
                     self.selected_session = None;
                     self.selected_group = None;
+                    self.selected_group_profile = None;
                 }
             }
         }

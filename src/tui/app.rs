@@ -338,10 +338,6 @@ impl App {
             Action::AttachTerminal(id, mode) => {
                 self.attach_terminal(&id, mode, terminal)?;
             }
-            Action::SwitchProfile(active_profile) => {
-                let tools = self.home.available_tools();
-                self.home = HomeView::new(active_profile, tools)?;
-            }
             Action::EditFile(path) => {
                 self.edit_file(&path, terminal)?;
             }
@@ -595,7 +591,6 @@ pub enum Action {
     Quit,
     AttachSession(String),
     AttachTerminal(String, TerminalMode),
-    SwitchProfile(Option<String>),
     EditFile(PathBuf),
     StopSession(String),
     SetTheme(String),

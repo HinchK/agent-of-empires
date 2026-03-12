@@ -136,7 +136,7 @@ impl HomeView {
         let inner = block.inner(area);
         frame.render_widget(block, area);
 
-        if self.instances.is_empty() && self.all_groups().is_empty() {
+        if self.instances.is_empty() && !self.has_any_groups() {
             let empty_text = vec![
                 Line::from(""),
                 Line::from("No sessions yet").style(Style::default().fg(theme.dimmed)),
@@ -252,7 +252,7 @@ impl HomeView {
                     ICON_EXPANDED
                 };
                 let text = Cow::Owned(format!("{} ({})", name, session_count));
-                let style = Style::default().fg(theme.group).bold().underlined();
+                let style = Style::default().fg(theme.group).bold();
                 (icon, text, style)
             }
             Item::Session { id, .. } => {

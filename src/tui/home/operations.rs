@@ -82,17 +82,30 @@ impl HomeView {
 
     pub(super) fn delete_selected_group(&mut self) -> anyhow::Result<()> {
         if let Some(group_path) = self.selected_group.take() {
+            let owning_profile = self.selected_group_profile.take();
             let prefix = format!("{}/", group_path);
+
+            // Only ungroup instances belonging to the owning profile
             for inst in &mut self.instances {
-                if inst.group_path == group_path || inst.group_path.starts_with(&prefix) {
+                if (inst.group_path == group_path || inst.group_path.starts_with(&prefix))
+                    && owning_profile
+                        .as_ref()
+                        .map_or(true, |p| p == &inst.source_profile)
+                {
                     inst.group_path = String::new();
                 }
             }
 
             self.rebuild_group_trees();
-            // Delete the group from whichever profile's tree contains it
-            for tree in self.group_trees.values_mut() {
-                tree.delete_group(&group_path);
+            // Delete the group only from the owning profile's tree
+            if let Some(profile) = &owning_profile {
+                if let Some(tree) = self.group_trees.get_mut(profile) {
+                    tree.delete_group(&group_path);
+                }
+            } else {
+                for tree in self.group_trees.values_mut() {
+                    tree.delete_group(&group_path);
+                }
             }
             self.save()?;
 
@@ -106,12 +119,18 @@ impl HomeView {
         options: &GroupDeleteOptions,
     ) -> anyhow::Result<()> {
         if let Some(group_path) = self.selected_group.take() {
+            let owning_profile = self.selected_group_profile.take();
             let prefix = format!("{}/", group_path);
 
             let sessions_to_delete: Vec<String> = self
                 .instances
                 .iter()
-                .filter(|i| i.group_path == group_path || i.group_path.starts_with(&prefix))
+                .filter(|i| {
+                    (i.group_path == group_path || i.group_path.starts_with(&prefix))
+                        && owning_profile
+                            .as_ref()
+                            .map_or(true, |p| p == &i.source_profile)
+                })
                 .map(|i| i.id.clone())
                 .collect();
 
@@ -146,8 +165,14 @@ impl HomeView {
                 }
             }
 
-            for tree in self.group_trees.values_mut() {
-                tree.delete_group(&group_path);
+            if let Some(profile) = &owning_profile {
+                if let Some(tree) = self.group_trees.get_mut(profile) {
+                    tree.delete_group(&group_path);
+                }
+            } else {
+                for tree in self.group_trees.values_mut() {
+                    tree.delete_group(&group_path);
+                }
             }
             self.save()?;
             self.flat_items = self.build_flat_items();
