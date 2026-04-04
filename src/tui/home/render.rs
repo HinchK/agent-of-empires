@@ -183,7 +183,7 @@ impl HomeView {
         let list =
             List::new(list_items).highlight_style(Style::default().bg(theme.session_selection));
 
-        frame.render_widget(list, inner);
+        frame.render_stateful_widget(list, inner, &mut self.list_state);
 
         // Render search bar if active
         if self.search_active {
@@ -238,7 +238,7 @@ impl HomeView {
         is_selected: bool,
         is_match: bool,
         theme: &Theme,
-    ) -> ListItem<'_> {
+    ) -> ListItem<'static> {
         let indent = get_indent(item.depth());
 
         use std::borrow::Cow;
@@ -284,7 +284,7 @@ impl HomeView {
                                 Status::Deleting => theme.waiting,
                             };
                             let style = Style::default().fg(color);
-                            (icon, Cow::Borrowed(&inst.title), style)
+                            (icon, Cow::Owned(inst.title.clone()), style)
                         }
                         ViewMode::Terminal => {
                             // For sandboxed sessions, check the appropriate terminal based on mode
@@ -309,13 +309,13 @@ impl HomeView {
                                 (ICON_IDLE, theme.dimmed)
                             };
                             let style = Style::default().fg(color);
-                            (icon, Cow::Borrowed(&inst.title), style)
+                            (icon, Cow::Owned(inst.title.clone()), style)
                         }
                     }
                 } else {
                     (
                         "?",
-                        Cow::Borrowed(id.as_str()),
+                        Cow::Owned(id.clone()),
                         Style::default().fg(theme.dimmed),
                     )
                 }
