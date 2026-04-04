@@ -920,7 +920,6 @@ impl HomeView {
     }
 
     pub(super) fn update_selected(&mut self) {
-        self.list_state.select(Some(self.cursor));
         if let Some(item) = self.flat_items.get(self.cursor) {
             match item {
                 Item::Session { id, .. } => {

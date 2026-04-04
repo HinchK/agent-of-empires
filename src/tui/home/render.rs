@@ -168,22 +168,71 @@ impl HomeView {
             return;
         }
 
-        let list_items: Vec<ListItem> = self
+        // Manual scroll with "N more above/below" indicators (matches dir_picker pattern)
+        let visible_height = inner.height as usize;
+        let total = self.flat_items.len();
+        let scroll_offset = if total <= visible_height || visible_height == 0 {
+            0
+        } else {
+            let first_page = visible_height.saturating_sub(1);
+            if self.cursor < first_page {
+                0
+            } else {
+                let mid_page = visible_height.saturating_sub(2).max(1);
+                let raw_offset = self.cursor + 1 - mid_page;
+                let last_page = visible_height.saturating_sub(1);
+                let max_offset = total.saturating_sub(last_page);
+                raw_offset.min(max_offset)
+            }
+        };
+
+        let has_more_above = scroll_offset > 0;
+        let has_more_below = total > scroll_offset + visible_height;
+
+        let list_visible = if has_more_above && has_more_below {
+            visible_height.saturating_sub(2)
+        } else if has_more_above || has_more_below {
+            visible_height.saturating_sub(1)
+        } else {
+            visible_height
+        };
+
+        let mut lines: Vec<Line> = Vec::new();
+
+        if has_more_above {
+            lines.push(Line::from(Span::styled(
+                format!("  [{} more above]", scroll_offset),
+                Style::default().fg(theme.dimmed),
+            )));
+        }
+
+        for (i, item) in self
             .flat_items
             .iter()
+            .skip(scroll_offset)
+            .take(list_visible)
             .enumerate()
-            .map(|(idx, item)| {
-                let is_selected = idx == self.cursor;
-                let is_match =
-                    !self.search_matches.is_empty() && self.search_matches.contains(&idx);
-                self.render_item(item, is_selected, is_match, theme)
-            })
-            .collect();
+        {
+            let abs_idx = i + scroll_offset;
+            let is_selected = abs_idx == self.cursor;
+            let is_match =
+                !self.search_matches.is_empty() && self.search_matches.contains(&abs_idx);
+            let mut line = self.render_item_line(item, is_selected, is_match, theme);
+            if is_selected {
+                line = line.style(Style::default().bg(theme.session_selection));
+            }
+            lines.push(line);
+        }
 
-        let list =
-            List::new(list_items).highlight_style(Style::default().bg(theme.session_selection));
+        if has_more_below {
+            let remaining = total - scroll_offset - list_visible;
+            lines.push(Line::from(Span::styled(
+                format!("  [{} more below]", remaining),
+                Style::default().fg(theme.dimmed),
+            )));
+        }
 
-        frame.render_stateful_widget(list, inner, &mut self.list_state);
+        frame.render_widget(Paragraph::new(lines), inner);
 
         // Render search bar if active
         if self.search_active {
@@ -232,13 +281,13 @@ impl HomeView {
         }
     }
 
-    fn render_item(
+    fn render_item_line(
         &self,
         item: &Item,
         is_selected: bool,
         is_match: bool,
         theme: &Theme,
-    ) -> ListItem<'static> {
+    ) -> Line<'static> {
         let indent = get_indent(item.depth());
 
         use std::borrow::Cow;
@@ -370,7 +419,7 @@ impl HomeView {
             }
         }
 
-        ListItem::new(Line::from(line_spans))
+        Line::from(line_spans)
     }
 
     /// Refresh preview cache if needed (session changed, dimensions changed, or timer expired)

@@ -10,7 +10,6 @@ mod tests;
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
-use ratatui::widgets::ListState;
 use tui_input::Input;
 
 use crate::session::{
@@ -109,7 +108,6 @@ pub struct HomeView {
 
     // UI state
     pub(super) cursor: usize,
-    pub(super) list_state: ListState,
     pub(super) selected_session: Option<String>,
     pub(super) selected_group: Option<String>,
     /// Which profile the selected group belongs to (for scoped group operations)
@@ -251,7 +249,6 @@ impl HomeView {
             group_trees,
             flat_items: Vec::new(),
             cursor: 0,
-            list_state: ListState::default(),
             selected_session: None,
             selected_group: None,
             selected_group_profile: None,
