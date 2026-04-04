@@ -370,13 +370,7 @@ impl HomeView {
             }
         }
 
-        let line = Line::from(line_spans);
-
-        if is_selected {
-            ListItem::new(line).style(Style::default().bg(theme.session_selection))
-        } else {
-            ListItem::new(line)
-        }
+        ListItem::new(Line::from(line_spans))
     }
 
     /// Refresh preview cache if needed (session changed, dimensions changed, or timer expired)
