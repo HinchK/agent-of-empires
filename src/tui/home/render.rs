@@ -195,16 +195,22 @@ impl HomeView {
 
         // Calculate available space after the "above" indicator, then determine
         // whether a "below" indicator is needed from the remaining item count.
-        let available = if has_more_above {
-            visible_height.saturating_sub(1)
-        } else {
-            visible_height
-        };
+        // When visible_height <= 1, suppress indicators entirely to ensure at
+        // least the selected item is shown.
         let items_from_offset = total.saturating_sub(scroll_offset);
-        let (list_visible, has_more_below) = if items_from_offset > available {
-            (available.saturating_sub(1), true)
+        let (list_visible, has_more_above, has_more_below) = if visible_height <= 1 {
+            (items_from_offset.min(visible_height), false, false)
         } else {
-            (items_from_offset.min(available), false)
+            let available = if has_more_above {
+                visible_height - 1
+            } else {
+                visible_height
+            };
+            if items_from_offset > available {
+                (available.saturating_sub(1), has_more_above, true)
+            } else {
+                (items_from_offset.min(available), has_more_above, false)
+            }
         };
 
         let mut lines: Vec<Line> = Vec::new();
