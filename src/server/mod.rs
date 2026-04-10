@@ -7,8 +7,11 @@ pub mod api;
 pub mod auth;
 pub mod ws;
 
+use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+use axum::extract::ConnectInfo;
 use axum::Router;
 use rust_embed::Embed;
 use tokio::sync::RwLock;
@@ -26,74 +29,128 @@ pub struct AppState {
     pub auth_token: Option<String>,
     pub read_only: bool,
     pub instances: RwLock<Vec<Instance>>,
+    /// Controls whether non-local connections are accepted.
+    /// None = all connections allowed (CLI mode, no filtering).
+    /// Some(false) = only localhost (127.0.0.1, ::1) allowed.
+    /// Some(true) = all authenticated connections allowed (remote access on).
+    pub remote_enabled: Option<Arc<AtomicBool>>,
+    /// Broadcast channel for session status change events.
+    /// Desktop app subscribes to this for notifications.
+    pub status_events: Option<tokio::sync::broadcast::Sender<Vec<StatusChange>>>,
 }
 
-pub async fn start_server(
-    profile: &str,
-    host: &str,
-    port: u16,
-    no_auth: bool,
-    read_only: bool,
-) -> anyhow::Result<()> {
-    // Load initial session data from all profiles
+/// Describes a session status transition detected by the poll loop.
+#[derive(Clone, Debug)]
+pub struct StatusChange {
+    pub session_id: String,
+    pub title: String,
+    pub project_path: String,
+    pub tool: String,
+    pub old_status: String,
+    pub new_status: String,
+}
+
+/// Configuration for starting the web server.
+/// The CLI builds a default config; the desktop app customizes it.
+pub struct ServerConfig {
+    pub profile: String,
+    pub host: String,
+    pub port: u16,
+    pub no_auth: bool,
+    pub read_only: bool,
+    /// Remote access guard. None = no filtering (CLI default).
+    pub remote_enabled: Option<Arc<AtomicBool>>,
+    /// Whether to print the access URL banner to stdout.
+    pub print_banner: bool,
+    /// Whether to write the URL to ~/.agent-of-empires/serve.url.
+    pub write_url_file: bool,
+    /// Signal sent after the TCP listener binds successfully.
+    /// The desktop app waits on this before opening the webview.
+    pub ready_signal: Option<tokio::sync::oneshot::Sender<String>>,
+    /// Broadcast channel sender for status change events.
+    /// If provided, the poll loop will send status transitions through it.
+    pub status_events: Option<tokio::sync::broadcast::Sender<Vec<StatusChange>>>,
+}
+
+/// Generate a 32-character alphanumeric auth token.
+pub fn generate_auth_token() -> String {
+    use rand::RngExt;
+    let mut rng = rand::rng();
+    (0..32)
+        .map(|_| {
+            let idx = rng.random_range(0..36u8);
+            if idx < 10 {
+                (b'0' + idx) as char
+            } else {
+                (b'a' + idx - 10) as char
+            }
+        })
+        .collect()
+}
+
+/// Start the web server with the given configuration.
+/// Returns the auth token (or empty string if no_auth).
+pub async fn start_server_with_config(config: ServerConfig) -> anyhow::Result<String> {
     let instances = load_all_instances()?;
 
-    // Generate auth token
-    let auth_token = if no_auth {
+    let auth_token = if config.no_auth {
         eprintln!(
             "WARNING: Running without authentication. \
              Anyone with network access to this port can control your agent sessions."
         );
         None
     } else {
-        use rand::RngExt;
-        let mut rng = rand::rng();
-        let token: String = (0..32)
-            .map(|_| {
-                let idx = rng.random_range(0..36u8);
-                if idx < 10 {
-                    (b'0' + idx) as char
-                } else {
-                    (b'a' + idx - 10) as char
-                }
-            })
-            .collect();
-        Some(token)
+        Some(generate_auth_token())
     };
+
+    let token_result = auth_token.clone().unwrap_or_default();
 
     let state = Arc::new(AppState {
-        profile: profile.to_string(),
+        profile: config.profile,
         auth_token: auth_token.clone(),
-        read_only,
+        read_only: config.read_only,
         instances: RwLock::new(instances),
+        remote_enabled: config.remote_enabled,
+        status_events: config.status_events,
     });
 
-    // Build router
     let app = build_router(state.clone());
 
-    let addr = format!("{}:{}", host, port);
+    let addr = format!("{}:{}", config.host, config.port);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
 
-    // Build and print access URL
-    let display_host = if host == "0.0.0.0" { "localhost" } else { host };
-    let url = if let Some(ref token) = auth_token {
-        format!("http://{}:{}/?token={}", display_host, port, token)
+    // Build access URL
+    let display_host = if config.host == "0.0.0.0" {
+        "localhost"
     } else {
-        format!("http://{}:{}/", display_host, port)
+        &config.host
+    };
+    let url = if let Some(ref token) = auth_token {
+        format!("http://{}:{}/?token={}", display_host, config.port, token)
+    } else {
+        format!("http://{}:{}/", display_host, config.port)
     };
 
-    println!("aoe web dashboard running at:");
-    println!("  {}", url);
-    if auth_token.is_some() {
-        println!();
-        println!(
-            "Open this URL in any browser. Share it to access from other devices on your network."
-        );
+    if config.print_banner {
+        println!("aoe web dashboard running at:");
+        println!("  {}", url);
+        if auth_token.is_some() {
+            println!();
+            println!(
+                "Open this URL in any browser. Share it to access from other devices on your network."
+            );
+        }
     }
 
-    // Write URL to file so daemon users can retrieve it with `cat ~/.agent-of-empires/serve.url`
-    if let Ok(app_dir) = crate::session::get_app_dir() {
-        let _ = std::fs::write(app_dir.join("serve.url"), &url);
+    if config.write_url_file {
+        if let Ok(app_dir) = crate::session::get_app_dir() {
+            let _ = std::fs::write(app_dir.join("serve.url"), &url);
+        }
+    }
+
+    // Fire ready signal so the desktop app knows the server is listening
+    if let Some(tx) = config.ready_signal {
+        let _ = tx.send(url);
     }
 
     // Spawn background status polling task
@@ -102,8 +159,64 @@ pub async fn start_server(
         status_poll_loop(poll_state).await;
     });
 
-    axum::serve(listener, app).await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await?;
+    Ok(token_result)
+}
+
+/// Start the web server with default CLI settings (banner, URL file, no remote filtering).
+pub async fn start_server(
+    profile: &str,
+    host: &str,
+    port: u16,
+    no_auth: bool,
+    read_only: bool,
+) -> anyhow::Result<()> {
+    let config = ServerConfig {
+        profile: profile.to_string(),
+        host: host.to_string(),
+        port,
+        no_auth,
+        read_only,
+        remote_enabled: None,
+        print_banner: true,
+        write_url_file: true,
+        ready_signal: None,
+        status_events: None,
+    };
+    start_server_with_config(config).await?;
     Ok(())
+}
+
+/// Axum middleware that enforces remote access control.
+/// Checks AppState.remote_enabled and the client's IP address.
+pub async fn remote_access_middleware(
+    state: axum::extract::State<Arc<AppState>>,
+    connect_info: ConnectInfo<SocketAddr>,
+    request: axum::http::Request<axum::body::Body>,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+
+    if let Some(ref remote_flag) = state.remote_enabled {
+        if !remote_flag.load(Ordering::Relaxed) {
+            let ip = connect_info.0.ip();
+            let is_local = ip.is_loopback();
+            if !is_local {
+                return (
+                    StatusCode::FORBIDDEN,
+                    "Remote access is disabled. Enable it from the desktop app menu bar.",
+                )
+                    .into_response();
+            }
+        }
+    }
+    // remote_enabled is None (CLI mode) or true (remote on): pass through
+    next.run(request).await
 }
 
 fn build_router(state: Arc<AppState>) -> Router {
@@ -147,6 +260,11 @@ fn build_router(state: Arc<AppState>) -> Router {
         .route("/icon-512.png", get(serve_public_file))
         // SPA fallback: all other GET routes serve index.html
         .fallback(get(serve_index))
+        // Remote access middleware (checks before auth)
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            remote_access_middleware,
+        ))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             auth::auth_middleware,
@@ -211,11 +329,15 @@ fn load_all_instances() -> anyhow::Result<Vec<Instance>> {
 }
 
 /// Background task that periodically refreshes session statuses.
+/// Emits status change events through the broadcast channel when sessions transition.
 async fn status_poll_loop(state: Arc<AppState>) {
+    use std::collections::HashMap;
+
     let mut interval = tokio::time::interval(std::time::Duration::from_secs(2));
+    let mut previous_statuses: HashMap<String, String> = HashMap::new();
+
     loop {
         interval.tick().await;
-        // Run blocking tmux subprocess calls in a dedicated thread
         let updated = tokio::task::spawn_blocking(move || {
             let mut instances = load_all_instances().unwrap_or_default();
 
@@ -233,7 +355,164 @@ async fn status_poll_loop(state: Arc<AppState>) {
         .await;
 
         if let Ok(instances) = updated {
+            // Detect status transitions and emit events
+            if state.status_events.is_some() {
+                let mut changes = Vec::new();
+                for inst in &instances {
+                    let current_status = format!("{:?}", inst.status);
+                    let old_status = previous_statuses
+                        .get(&inst.id)
+                        .cloned()
+                        .unwrap_or_default();
+                    if !old_status.is_empty() && old_status != current_status {
+                        changes.push(StatusChange {
+                            session_id: inst.id.clone(),
+                            title: inst.title.clone(),
+                            project_path: inst.project_path.clone(),
+                            tool: inst.tool.clone(),
+                            old_status: old_status.clone(),
+                            new_status: current_status.clone(),
+                        });
+                    }
+                    previous_statuses.insert(inst.id.clone(), current_status);
+                }
+                if !changes.is_empty() {
+                    if let Some(ref tx) = state.status_events {
+                        // Ignore send errors (no subscribers is fine)
+                        let _ = tx.send(changes);
+                    }
+                }
+            }
+
             *state.instances.write().await = instances;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+    use std::sync::atomic::AtomicBool;
+
+    fn make_state(remote_enabled: Option<Arc<AtomicBool>>) -> Arc<AppState> {
+        Arc::new(AppState {
+            profile: "default".to_string(),
+            auth_token: Some("testtoken".to_string()),
+            read_only: false,
+            instances: RwLock::new(vec![]),
+            remote_enabled,
+            status_events: None,
+        })
+    }
+
+    /// Helper: returns true if the middleware would allow this IP.
+    fn is_allowed(remote_enabled: Option<Arc<AtomicBool>>, addr: SocketAddr) -> bool {
+        if let Some(ref flag) = remote_enabled {
+            if !flag.load(Ordering::Relaxed) {
+                return addr.ip().is_loopback();
+            }
+        }
+        true
+    }
+
+    #[test]
+    fn test_remote_middleware_local_ipv4_always_passes() {
+        let flag = Arc::new(AtomicBool::new(false));
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 12345);
+        assert!(is_allowed(Some(flag), addr));
+    }
+
+    #[test]
+    fn test_remote_middleware_local_ipv6_always_passes() {
+        let flag = Arc::new(AtomicBool::new(false));
+        let addr = SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 12345);
+        assert!(is_allowed(Some(flag), addr));
+    }
+
+    #[test]
+    fn test_remote_middleware_remote_ip_blocked_when_off() {
+        let flag = Arc::new(AtomicBool::new(false));
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100)), 12345);
+        assert!(!is_allowed(Some(flag), addr));
+    }
+
+    #[test]
+    fn test_remote_middleware_remote_ip_allowed_when_on() {
+        let flag = Arc::new(AtomicBool::new(true));
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100)), 12345);
+        assert!(is_allowed(Some(flag), addr));
+    }
+
+    #[test]
+    fn test_remote_middleware_none_allows_all() {
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 50)), 12345);
+        assert!(is_allowed(None, addr));
+    }
+
+    #[test]
+    fn test_server_config_default_matches_cli() {
+        let config = ServerConfig {
+            profile: "default".to_string(),
+            host: "127.0.0.1".to_string(),
+            port: 8080,
+            no_auth: false,
+            read_only: false,
+            remote_enabled: None,
+            print_banner: true,
+            write_url_file: true,
+            ready_signal: None,
+            status_events: None,
+        };
+        assert!(config.print_banner);
+        assert!(config.write_url_file);
+        assert!(config.remote_enabled.is_none());
+        assert!(config.ready_signal.is_none());
+    }
+
+    #[test]
+    fn test_server_config_desktop_mode() {
+        let flag = Arc::new(AtomicBool::new(false));
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        let (events_tx, _events_rx) = tokio::sync::broadcast::channel(16);
+        let config = ServerConfig {
+            profile: "default".to_string(),
+            host: "0.0.0.0".to_string(),
+            port: 8080,
+            no_auth: false,
+            read_only: false,
+            remote_enabled: Some(flag.clone()),
+            print_banner: false,
+            write_url_file: false,
+            ready_signal: Some(tx),
+            status_events: Some(events_tx),
+        };
+        assert!(!config.print_banner);
+        assert!(!config.write_url_file);
+        assert!(config.remote_enabled.is_some());
+    }
+
+    #[test]
+    fn test_broadcast_no_subscribers_no_panic() {
+        let (tx, _) = tokio::sync::broadcast::channel::<Vec<StatusChange>>(16);
+        // Drop the receiver, then send. Should not panic.
+        drop(_);
+        let result = tx.send(vec![StatusChange {
+            session_id: "test".to_string(),
+            title: "test".to_string(),
+            project_path: "/tmp".to_string(),
+            tool: "claude".to_string(),
+            old_status: "Running".to_string(),
+            new_status: "Waiting".to_string(),
+        }]);
+        // SendError is expected when no receivers, but no panic
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_generate_auth_token_length() {
+        let token = generate_auth_token();
+        assert_eq!(token.len(), 32);
+        assert!(token.chars().all(|c| c.is_ascii_alphanumeric()));
     }
 }
