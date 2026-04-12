@@ -55,6 +55,21 @@ last_seen_version = "999.0.0"
 TOML
 
 # ---------------------------------------------------------------------------
+# Create stub agent binaries (so aoe finds "claude" etc. without running real agents)
+# Pattern from tests/e2e/harness.rs — stubs run bash instead of real agents
+# ---------------------------------------------------------------------------
+STUB_DIR="$DEMO_TMPDIR/stubs"
+mkdir -p "$STUB_DIR"
+for agent in claude opencode codex; do
+  cat > "$STUB_DIR/$agent" << 'STUB'
+#!/bin/sh
+exec bash
+STUB
+  chmod +x "$STUB_DIR/$agent"
+done
+export PATH="$STUB_DIR:$PATH"
+
+# ---------------------------------------------------------------------------
 # Create demo git repos with unstaged changes (for diff panel)
 # ---------------------------------------------------------------------------
 DEMO_DIR="$DEMO_TMPDIR/projects"
@@ -101,6 +116,9 @@ fi
 # Create sessions (no --launch to avoid blocking)
 # ---------------------------------------------------------------------------
 echo "Creating demo sessions..."
+# --cmd-override bash ensures bash runs instead of the real agent binary.
+# Stubs on PATH above handle tool detection (which claude), but the tmux
+# server may use its own PATH, so --cmd-override is the reliable mechanism.
 ID1=$($AOE add "$DEMO_DIR/api-server" -t "API Server" -c claude --cmd-override bash 2>&1 | grep "ID:" | awk '{print $2}')
 ID2=$($AOE add "$DEMO_DIR/web-app" -t "Web App" -c opencode --cmd-override bash 2>&1 | grep "ID:" | awk '{print $2}')
 ID3=$($AOE add "$DEMO_DIR/chat-app" -t "Chat App" -c codex --cmd-override bash 2>&1 | grep "ID:" | awk '{print $2}')
@@ -132,7 +150,7 @@ TMUX2="aoe_Web_App_${ID2:0:8}"
 TMUX3="aoe_Chat_App_${ID3:0:8}"
 
 tmux send-keys -t "$TMUX1" "clear && printf '\\033[36m● Reading src/main.rs...\\033[0m\\n\\033[33m⏳ Analyzing 3 files\\033[0m\\n\\033[32m✓ Found 1 function\\033[0m\\n'" Enter
-tmux send-keys -t "$TMUX2" "clear && printf '\\033[36m● Loading dependencies...\\033[0m\\n\\033[33m◐ Waiting for approval\\033[0m\\n'" Enter
+tmux send-keys -t "$TMUX2" "clear && printf '\\033[36m● Loading dependencies...\\033[0m\\n\\033[33m⏳ Scanning package.json\\033[0m\\n'" Enter
 tmux send-keys -t "$TMUX3" "clear && printf '\\033[36m● Checking project structure...\\033[0m\\n\\033[32m✓ No issues found\\033[0m\\n'" Enter
 
 sleep 1  # let terminal content render
