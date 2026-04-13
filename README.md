@@ -13,7 +13,7 @@
   </p>
 </p>
 
-A session manager for AI coding agents on Linux and macOS. Use it from the **terminal (TUI)** or from **any browser ([web dashboard](docs/guides/web-dashboard.md), experimental)**. Built on tmux, written in Rust.
+A session manager for AI coding agents on Linux and macOS. Use it from the terminal (TUI)or from any browser ([web dashboard](docs/guides/web-dashboard.md).
 
 Run multiple AI agents in parallel across different branches of your codebase, each in its own isolated session with optional Docker sandboxing. Access your agents from your laptop, phone, or tablet.
 
@@ -24,20 +24,18 @@ Run multiple AI agents in parallel across different branches of your codebase, e
 ## Features
 
 - **Multi-agent support** -- Claude Code, OpenCode, Mistral Vibe, Codex CLI, Gemini CLI, Cursor CLI, Copilot CLI, Pi.dev, and Factory Droid
-- **TUI dashboard** -- visual interface to create, monitor, and manage sessions
-- **Agent + terminal views** -- toggle between your AI agents and paired shell terminals with `t`
+- **Web App** -- create, monitor and control your agents from any browser, installable as a PWA ([experimental](docs/guides/web-dashboard.md))
+- **TUI App** -- visual interface to create, monitor, and manage sessions
+- **CLI App** -- create, monitor and control agents via cli (allows for integration into tools like openclaw)
 - **Status detection** -- see which agents are running, waiting for input, or idle
 - **Git worktrees** -- run parallel agents on different branches of the same repo
 - **Docker sandboxing** -- isolate agents in containers with shared auth volumes
 - **Diff view** -- review git changes and edit files without leaving the TUI
-- **Web dashboard** -- monitor and control sessions from any browser, installable as a PWA ([experimental](docs/guides/web-dashboard.md))
-- **Per-repo config** -- `.agent-of-empires/config.toml` for project-specific settings and hooks
 - **Profiles** -- separate workspaces for different projects or clients
-- **CLI and TUI** -- full functionality from both interfaces
 
 ## How It Works
 
-AoE wraps [tmux](https://github.com/tmux/tmux/wiki). Each session is a tmux session, so agents keep running when you close the TUI. Reopen `aoe` and everything is still there.
+aoe wraps [tmux](https://github.com/tmux/tmux/wiki). Each session is a tmux session, so agents keep running when you close the TUI. Reopen `aoe` and everything is still there.
 
 The key tmux shortcut to know: **`Ctrl+b d`** detaches from a session and returns to the TUI.
 
@@ -68,17 +66,9 @@ cd agent-of-empires && cargo build --release
 # Launch the TUI
 aoe
 
-# Add a session from CLI
-aoe add /path/to/project
-
-# Add a session on a new git branch
-aoe add . -w feat/my-feature -b
-
-# Add a sandboxed session
-aoe add --sandbox .
 ```
 
-In the TUI: `n` to create a session, `Enter` to attach, `t` to toggle terminal view, `D` for diff view, `d` to delete, `?` for help.
+In the TUI: `?` for help, the bottom information bar in the TUI gives all the info you need.
 
 ## Documentation
 
