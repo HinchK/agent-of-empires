@@ -109,3 +109,57 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  verify-images:
+    name: Verify Images
+    needs: [build-base, build-dev]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    strategy:
+      matrix:
+        platform: [linux/amd64, linux/arm64]
+    steps:
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@ce360397dd3f832beb865e1373c09c0e9f86d70a # v4.0.0
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Verify native binaries are not empty
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ github.event.inputs.tag }}"
+          fi
+
+          for image in aoe-sandbox aoe-dev-sandbox; do
+            echo "=== Verifying ${{ env.REGISTRY }}/njbrake/${image}:${TAG} (${{ matrix.platform }}) ==="
+            docker pull --platform ${{ matrix.platform }} ${{ env.REGISTRY }}/njbrake/${image}:${TAG}
+
+            docker run --rm --platform ${{ matrix.platform }} ${{ env.REGISTRY }}/njbrake/${image}:${TAG} sh -c '
+              failed=0
+              for bin in \
+                /root/.local/bin/claude \
+              ; do
+                if [ ! -e "$bin" ]; then
+                  echo "FAIL: $bin does not exist"
+                  failed=1
+                elif [ ! -s "$bin" ]; then
+                  real=$(readlink -f "$bin" 2>/dev/null || echo "$bin")
+                  echo "FAIL: $bin -> $real is empty (0 bytes)"
+                  failed=1
+                else
+                  real=$(readlink -f "$bin" 2>/dev/null || echo "$bin")
+                  size=$(wc -c < "$real")
+                  echo "OK:   $bin -> $real ($size bytes)"
+                fi
+              done
+              exit $failed
+            '
+          done
