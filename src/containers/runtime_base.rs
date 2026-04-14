@@ -3,6 +3,24 @@ use super::error::{DockerError, Result};
 use sha2::{Digest, Sha256};
 use std::process::Command;
 
+/// Detect the local platform architecture in Docker's naming convention.
+/// Maps system arch (e.g. "aarch64", "x86_64") to Docker platform names
+/// (e.g. "arm64", "amd64").
+fn detect_local_arch() -> &'static str {
+    match std::env::consts::ARCH {
+        "aarch64" => "arm64",
+        "x86_64" => "amd64",
+        "x86" => "386",
+        "arm" => "arm",
+        "s390x" => "s390x",
+        "powerpc64" => "ppc64le",
+        other => {
+            tracing::debug!("Unknown arch '{}', falling back to amd64", other);
+            "amd64"
+        }
+    }
+}
+
 /// Compute a hex-encoded SHA-256 hash of the input string.
 fn sha256_hash(input: &str) -> String {
     let mut hasher = Sha256::new();
@@ -125,7 +143,8 @@ impl RuntimeBase {
 
     /// Get the remote manifest digest for an image without pulling it.
     /// Uses `manifest inspect --verbose` to get the descriptor digest from
-    /// the registry, which matches the RepoDigests format from local inspect.
+    /// the registry, matching the current platform's architecture so the
+    /// digest is comparable with the locally-pulled image's RepoDigests.
     pub fn get_remote_manifest_digest(&self, image: &str) -> Result<String> {
         let output = self
             .command()
@@ -142,14 +161,28 @@ impl RuntimeBase {
         }
 
         let stdout = String::from_utf8_lossy(&output.stdout);
+        let local_arch = detect_local_arch();
 
         // --verbose output is a JSON object (single platform) or array (manifest list).
         // Both contain a "Descriptor.digest" field with the registry-level digest.
         if let Ok(json) = serde_json::from_str::<serde_json::Value>(&stdout) {
-            // Array (manifest list): the top-level descriptor has the list digest
+            // Array (manifest list): find the entry matching our architecture
             if let Some(arr) = json.as_array() {
-                // Each entry has a Descriptor; use the first one's digest
-                // as a proxy, or look for an overall descriptor
+                // First pass: find exact arch match
+                for entry in arr {
+                    let arch = entry
+                        .pointer("/Descriptor/platform/architecture")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    if arch == local_arch {
+                        if let Some(digest) =
+                            entry.pointer("/Descriptor/digest").and_then(|v| v.as_str())
+                        {
+                            return Ok(digest.to_string());
+                        }
+                    }
+                }
+                // Fallback: use first entry if no arch match found
                 if let Some(first) = arr.first() {
                     if let Some(digest) =
                         first.pointer("/Descriptor/digest").and_then(|v| v.as_str())
