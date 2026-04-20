@@ -364,7 +364,11 @@ pub fn compute_file_diff(
         && index.conflicts()?.any(|c| {
             c.ok()
                 .and_then(|c| c.our.or(c.their).or(c.ancestor))
-                .and_then(|e| std::str::from_utf8(&e.path).ok().map(|p| Path::new(p) == file_path))
+                .and_then(|e| {
+                    std::str::from_utf8(&e.path)
+                        .ok()
+                        .map(|p| Path::new(p) == file_path)
+                })
                 .unwrap_or(false)
         });
 
@@ -1033,7 +1037,10 @@ mod tests {
         let diff = compute_file_diff(dir.path(), Path::new("conflicted.txt"), "main", 3).unwrap();
 
         assert_eq!(diff.file.status, FileStatus::Conflicted);
-        assert!(!diff.hunks.is_empty(), "Should produce hunks for conflicted file");
+        assert!(
+            !diff.hunks.is_empty(),
+            "Should produce hunks for conflicted file"
+        );
 
         let all_content: String = diff
             .hunks
