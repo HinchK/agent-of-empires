@@ -139,9 +139,6 @@ export function useTerminal(
     //    so we detect those and send \x7f for each one.
     //    A ZWS seed keeps the textarea non-empty so iOS always has
     //    something to delete on each repeat tick.
-    // 3. Override autocapitalize from "off" to "sentences" so iOS
-    //    enables smart keyboard behaviors (e.g. auto-return from the
-    //    "123" punctuation view back to letters after typing punctuation).
     // Paste: wterm's textarea has pointerEvents:none and is 1x1px, so
     // iOS can't show a paste popup on it. Use the toolbar Paste button.
     const BACKSPACE_SEED = "\u200B";
@@ -158,11 +155,6 @@ export function useTerminal(
       // wterm sets opacity:0; override so the textarea is technically
       // "visible" to iOS (needed for future keyboard/paste improvements).
       wtermTextarea.style.opacity = "0.01";
-
-      // wterm sets autocapitalize="off" which disables iOS smart keyboard
-      // behaviors. Override to "sentences" so iOS can auto-return from the
-      // 123 punctuation view after typing punctuation.
-      wtermTextarea.setAttribute("autocapitalize", "sentences");
 
       const seedTextarea = () => {
         if (wtermTextarea && !wtermTextarea.value) {
