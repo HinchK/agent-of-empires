@@ -1,4 +1,9 @@
-//! Session instance definition and operations
+//! Session instance definition and operations.
+//!
+//! Split into three submodule files so the impl block isn't one 750-line
+//! wall: this module owns struct definitions, core lifecycle, and tests;
+//! `terminal` owns paired-terminal methods; `container` owns container
+//! lifecycle.
 
 use std::path::Path;
 
@@ -7,11 +12,13 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::containers::{self, ContainerRuntimeInterface, DockerContainer};
+use crate::containers;
 use crate::tmux;
 
-use super::container_config;
 use super::environment::{build_docker_env_args, shell_escape};
+
+mod container;
+mod terminal;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TerminalInfo {
@@ -241,107 +248,6 @@ impl Instance {
         tmux::Session::new(&self.id, &self.title)
     }
 
-    pub fn terminal_tmux_session(&self) -> Result<tmux::TerminalSession> {
-        tmux::TerminalSession::new(&self.id, &self.title)
-    }
-
-    pub fn has_terminal(&self) -> bool {
-        self.terminal_info
-            .as_ref()
-            .map(|t| t.created)
-            .unwrap_or(false)
-    }
-
-    pub fn start_terminal(&mut self) -> Result<()> {
-        self.start_terminal_with_size(None)
-    }
-
-    pub fn start_terminal_with_size(&mut self, size: Option<(u16, u16)>) -> Result<()> {
-        let session = self.terminal_tmux_session()?;
-
-        let is_new = !session.exists();
-        if is_new {
-            session.create_with_size(&self.project_path, None, size)?;
-        }
-
-        // Apply all configured tmux options to terminal sessions too
-        if is_new {
-            self.apply_terminal_tmux_options();
-        }
-
-        self.terminal_info = Some(TerminalInfo { created: true });
-
-        Ok(())
-    }
-
-    pub fn kill_terminal(&self) -> Result<()> {
-        let session = self.terminal_tmux_session()?;
-        if session.exists() {
-            session.kill()?;
-        }
-        Ok(())
-    }
-
-    pub fn container_terminal_tmux_session(&self) -> Result<tmux::ContainerTerminalSession> {
-        tmux::ContainerTerminalSession::new(&self.id, &self.title)
-    }
-
-    pub fn has_container_terminal(&self) -> bool {
-        self.container_terminal_tmux_session()
-            .map(|s| s.exists())
-            .unwrap_or(false)
-    }
-
-    pub fn start_container_terminal_with_size(&mut self, size: Option<(u16, u16)>) -> Result<()> {
-        if !self.is_sandboxed() {
-            anyhow::bail!("Cannot create container terminal for non-sandboxed session");
-        }
-
-        let container = self.get_container_for_instance()?;
-        let sandbox = self.sandbox_info.as_ref().unwrap();
-
-        let env_info = build_docker_env_args(sandbox, std::path::Path::new(&self.project_path));
-        let env_part = if env_info.docker_args.is_empty() {
-            String::new()
-        } else {
-            format!("{} ", env_info.docker_args)
-        };
-
-        // Get workspace path inside container (handles bare repo worktrees correctly)
-        let container_workdir = self.container_workdir();
-
-        let cmd = container.exec_command(
-            Some(&format!("-w {} {}", container_workdir, env_part)),
-            "/bin/bash",
-        );
-
-        // If there are secret env vars, prepend shell exports and use `exec`
-        // so the outer shell (whose argv briefly contains the export values)
-        // is replaced immediately, keeping secrets out of long-lived process argv.
-        let session_cmd = if env_info.exports.is_empty() {
-            cmd
-        } else {
-            let exports = env_info.exports.join("; ");
-            format!("{}; exec {}", exports, cmd)
-        };
-
-        let session = self.container_terminal_tmux_session()?;
-        let is_new = !session.exists();
-        if is_new {
-            session.create_with_size(&self.project_path, Some(&session_cmd), size)?;
-            self.apply_container_terminal_tmux_options();
-        }
-
-        Ok(())
-    }
-
-    pub fn kill_container_terminal(&self) -> Result<()> {
-        let session = self.container_terminal_tmux_session()?;
-        if session.exists() {
-            session.kill()?;
-        }
-        Ok(())
-    }
 
     fn sandbox_display(&self) -> Option<crate::tmux::status_bar::SandboxDisplay> {
         self.sandbox_info.as_ref().and_then(|s| {
@@ -371,10 +277,6 @@ impl Instance {
         );
     }
 
-    fn apply_container_terminal_tmux_options(&self) {
-        let name = tmux::ContainerTerminalSession::generate_name(&self.id, &self.title);
-        self.apply_session_tmux_options(&name, &format!("{} (container)", self.title));
-    }
 
     pub fn start(&mut self) -> Result<()> {
         self.start_with_size(None)
@@ -606,62 +508,6 @@ impl Instance {
         self.apply_session_tmux_options(&name, &self.title);
     }
 
-    fn apply_terminal_tmux_options(&self) {
-        let name = tmux::TerminalSession::generate_name(&self.id, &self.title);
-        self.apply_session_tmux_options(&name, &format!("{} (terminal)", self.title));
-    }
-
-    pub fn get_container_for_instance(&mut self) -> Result<containers::DockerContainer> {
-        let sandbox = self
-            .sandbox_info
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Cannot ensure container for non-sandboxed session"))?;
-
-        let image = &sandbox.image;
-        let container = DockerContainer::new(&self.id, image);
-
-        if container.is_running()? {
-            container_config::refresh_agent_configs();
-            return Ok(container);
-        }
-
-        if container.exists()? {
-            container_config::refresh_agent_configs();
-            container.start()?;
-            return Ok(container);
-        }
-
-        // Ensure image is available (always pulls to get latest)
-        let runtime = containers::get_container_runtime();
-        runtime.ensure_image(image)?;
-
-        let config = self.build_container_config()?;
-        let container_id = container.create(&config)?;
-
-        if let Some(ref mut sandbox) = self.sandbox_info {
-            sandbox.container_id = Some(container_id);
-        }
-
-        Ok(container)
-    }
-
-    /// Get the container working directory for this instance.
-    pub fn container_workdir(&self) -> String {
-        container_config::compute_volume_paths(Path::new(&self.project_path), &self.project_path)
-            .map(|(_, wd)| wd)
-            .unwrap_or_else(|_| "/workspace".to_string())
-    }
-
-    fn build_container_config(&self) -> Result<crate::containers::ContainerConfig> {
-        container_config::build_container_config(
-            &self.project_path,
-            self.sandbox_info.as_ref().unwrap(),
-            &self.tool,
-            self.is_yolo_mode(),
-            &self.id,
-            self.workspace_info.as_ref(),
-        )
-    }
 
     pub fn restart(&mut self) -> Result<()> {
         self.restart_with_size(None)
