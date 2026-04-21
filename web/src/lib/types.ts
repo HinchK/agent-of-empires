@@ -1,3 +1,11 @@
+// IMPORTANT: this file is hand-maintained but mirrors the Rust DTOs in
+// src/server/api/. Code-quality scan finding #4 was to switch to
+// `typeshare` so these types regenerate from the Rust source of truth
+// (see src/server/api/sessions.rs:SessionResponse, etc.). Deferred:
+// adding the typeshare crate + a build.rs codegen step warrants its
+// own PR with CI verification of the codegen output. Until then, when
+// you change a Rust DTO, hand-update the matching interface here.
+
 /** Session data returned by the API */
 export interface SessionResponse {
   id: string;
