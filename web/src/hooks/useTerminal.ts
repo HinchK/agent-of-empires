@@ -129,18 +129,61 @@ export function useTerminal(
 
     termRef.current = term;
 
-    // Two iOS patches for wterm's textarea:
-    // 1. Move from -9999px to 0,0 so iOS shows the soft keyboard on focus.
-    // 2. Fix backspace repeat: wterm calls preventDefault() on all keydown
-    //    events, which prevents iOS from entering its key-repeat loop.
-    //    We intercept Backspace in capture phase, skip wterm's handler,
-    //    and let the native deletion happen. iOS repeat fires "input"
-    //    events with inputType "deleteContentBackward" (not keydown),
-    //    so we detect those and send \x7f for each one.
-    //    A ZWS seed keeps the textarea non-empty so iOS always has
-    //    something to delete on each repeat tick.
-    // Paste: wterm's textarea has pointerEvents:none and is 1x1px, so
-    // iOS can't show a paste popup on it. Use the toolbar Paste button.
+    // Sequence map for non-printable keys, mirroring wterm's keyToSequence
+    // so our mobile capture-phase handler sends the same bytes wterm would.
+    const MOBILE_FIXED_KEYS: Record<string, string> = {
+      Enter: "\r",
+      Tab: "\t",
+      Escape: "\x1b",
+      Insert: "\x1b[2~",
+      Delete: "\x1b[3~",
+      PageUp: "\x1b[5~",
+      PageDown: "\x1b[6~",
+      ArrowUp: "\x1b[A",
+      ArrowDown: "\x1b[B",
+      ArrowRight: "\x1b[C",
+      ArrowLeft: "\x1b[D",
+      Home: "\x1b[H",
+      End: "\x1b[F",
+    };
+    const mobileKeyToSequence = (e: KeyboardEvent): string | null => {
+      if (e.key === "Enter" && e.shiftKey) return "\x1b[13;2u";
+      if (e.key === "Tab" && e.shiftKey) return "\x1b[Z";
+      const seq = MOBILE_FIXED_KEYS[e.key];
+      if (seq) return e.altKey ? "\x1b" + seq : seq;
+      return null;
+    };
+
+    // iOS mobile patches for wterm's textarea.
+    //
+    // wterm creates a 1px invisible textarea with autocapitalize="off" and
+    // calls preventDefault() on all keydown events. This combination makes
+    // iOS treat it as a raw/code input where smart keyboard behaviors are
+    // disabled, including the auto-return from the "123" punctuation view
+    // back to letters after typing punctuation like . , ! ?
+    //
+    // Three things need to change simultaneously for iOS to enable smart
+    // keyboard behaviors on a web textarea:
+    //   1. The textarea must be a reasonable size (not 1px).
+    //   2. autocapitalize must not be "off".
+    //   3. preventDefault() must not block the native keydown action.
+    //
+    // We address all three on mobile:
+    //   - Size the textarea to fill the terminal area (invisible via
+    //     opacity 0.01, non-interactive via pointerEvents:none).
+    //   - Override autocapitalize to "sentences". Since we send e.key
+    //     from the keydown event (not the textarea value), any auto-
+    //     capitalization iOS applies to the textarea is harmless.
+    //   - Intercept all keydown events in capture phase before wterm,
+    //     send the bytes ourselves via WebSocket, and let the native
+    //     keydown proceed without preventDefault.
+    //   - Intercept input events in capture phase to prevent wterm's
+    //     handleInput from double-sending characters that the native
+    //     (un-prevented) keydown inserts into the textarea.
+    //   - Keep the ZWS seed for iOS backspace key-repeat.
+    //
+    // Paste: wterm's textarea has pointerEvents:none, so iOS can't show
+    // a paste popup on it. Use the toolbar Paste button instead.
     const BACKSPACE_SEED = "\u200B";
     let wtermTextarea: HTMLTextAreaElement | null = null;
     const setupMobileTextarea = () => {
@@ -148,13 +191,19 @@ export function useTerminal(
       wtermTextarea = termEl.querySelector("textarea");
       if (!wtermTextarea) return;
 
-      // Move wterm's textarea from -9999px into the viewport so iOS
-      // opens the soft keyboard when it receives focus.
+      // Move wterm's textarea into the viewport and size it so iOS
+      // treats it as a real text input. wterm defaults to 1px x 1px
+      // at -9999px, which causes iOS to skip smart keyboard behaviors.
       wtermTextarea.style.left = "0";
       wtermTextarea.style.top = "0";
-      // wterm sets opacity:0; override so the textarea is technically
-      // "visible" to iOS (needed for future keyboard/paste improvements).
+      wtermTextarea.style.width = "100%";
+      wtermTextarea.style.height = "100%";
       wtermTextarea.style.opacity = "0.01";
+
+      // wterm sets autocapitalize="off", telling iOS to disable smart
+      // keyboard behaviors. Override so iOS can auto-return from the
+      // 123 punctuation view after typing punctuation characters.
+      wtermTextarea.setAttribute("autocapitalize", "sentences");
 
       const seedTextarea = () => {
         if (wtermTextarea && !wtermTextarea.value) {
@@ -165,27 +214,66 @@ export function useTerminal(
       wtermTextarea.addEventListener("focus", seedTextarea);
       seedTextarea();
 
-      // Capture-phase: block wterm's preventDefault on Backspace so iOS
-      // can enter its key-repeat loop. Don't send \x7f here; the native
-      // deletion fires a deleteContentBackward input event which handles it.
+      const sendBytes = (data: string) => {
+        const ws = wsRef.current;
+        if (ws?.readyState === WebSocket.OPEN) {
+          ws.send(new TextEncoder().encode(data));
+        }
+      };
+
+      // Capture-phase keydown: intercept before wterm's handler so we
+      // can send bytes directly and skip wterm's preventDefault().
       wtermTextarea.addEventListener("keydown", (e: KeyboardEvent) => {
-        if (e.key !== "Backspace") return;
-        e.stopImmediatePropagation();
+        // Let wterm handle modifier combos (Ctrl+C, Cmd+V, etc.)
+        if (e.metaKey || e.ctrlKey) return;
+        // Let wterm handle composition (IME input)
+        if (e.isComposing) return;
+
+        if (e.key === "Backspace") {
+          // Don't send \x7f here; the native deletion fires a
+          // deleteContentBackward input event which handles it below.
+          e.stopImmediatePropagation();
+          return;
+        }
+
+        // Single printable character: send directly and let the native
+        // keydown proceed so iOS can run its keyboard logic.
+        if (e.key.length === 1) {
+          e.stopImmediatePropagation();
+          sendBytes(e.altKey ? "\x1b" + e.key : e.key);
+          return;
+        }
+
+        // Enter, Tab, Escape, arrows, etc.
+        const seq = mobileKeyToSequence(e);
+        if (seq) {
+          e.stopImmediatePropagation();
+          sendBytes(seq);
+        }
+        // Unknown/unhandled keys fall through to wterm.
       }, true);
 
-      // All backspace handling (first press + iOS repeat) comes through
-      // here as deleteContentBackward input events. Send \x7f and re-seed.
+      // Capture-phase input: since we don't call preventDefault on
+      // keydown, the browser inserts characters into the textarea.
+      // Block wterm's handleInput from reading them (double-send).
       const ta = wtermTextarea;
       ta.addEventListener("input", (e: Event) => {
         const ie = e as InputEvent;
         if (ie.inputType === "deleteContentBackward") {
-          const ws = wsRef.current;
-          if (ws?.readyState === WebSocket.OPEN) {
-            ws.send(new TextEncoder().encode("\x7f"));
-          }
+          sendBytes("\x7f");
+          queueMicrotask(seedTextarea);
+          e.stopImmediatePropagation();
+          return;
         }
+        if (ie.inputType === "insertCompositionText") {
+          // Let wterm's compositionend handler deal with this.
+          return;
+        }
+        // insertText from our un-prevented keydown: swallow it.
+        e.stopImmediatePropagation();
+        ta.value = "";
         queueMicrotask(seedTextarea);
-      });
+      }, true);
     };
 
     // Initialize the WASM bridge, then connect to the PTY.
