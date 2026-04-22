@@ -274,7 +274,9 @@ pub async fn browse_filesystem(
                 is_git_repo,
             });
         }
-        entries.sort_by_key(|e| e.name.to_lowercase());
+        // Cached: avoids re-allocating the lowercase String on every comparison
+        // (sort_by_key calls the keyfn O(n log n) times, sort_by_cached_key calls it O(n)).
+        entries.sort_by_cached_key(|e| e.name.to_lowercase());
         let has_more = entries.len() > limit;
         entries.truncate(limit);
         Ok(BrowseResponse { entries, has_more })

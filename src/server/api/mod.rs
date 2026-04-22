@@ -26,24 +26,23 @@ pub use system::{
 };
 
 const SHELL_METACHARACTERS: &[char] = &[
-    '$', '`', '\\', '!', '\n', '\r', '\t', '\0', '|', ';', '&', '<', '>', '\'', '"', '(', ')', '{',
-    '}', '*', '?',
+    ';', '&', '|', '$', '`', '(', ')', '{', '}', '<', '>', '\n', '\r', '\\', '"', '\'', '!', '#',
+    '*', '?', '[', ']', '~', '\t', '\0',
 ];
 
 pub(super) fn validate_no_shell_injection(value: &str, field_name: &str) -> Result<(), String> {
     if let Some(c) = value.chars().find(|c| SHELL_METACHARACTERS.contains(c)) {
-        Err(format!(
-            "{} contains invalid character: {:?}",
-            field_name, c
-        ))
-    } else {
-        Ok(())
+        return Err(format!(
+            "Invalid character '{}' in {}. Shell metacharacters are not allowed.",
+            c, field_name
+        ));
     }
+    Ok(())
 }
 
 pub(super) const ALLOWED_SETTINGS_SECTIONS: &[&str] = &[
-    "theme", "updates", "session", "worktree", "sandbox", "tmux", "sound", "hooks", "web",
+    "theme", "session", "tmux", "updates", "sound", "sandbox", "worktree",
 ];
 
 pub(super) const SESSION_BLOCKED_FIELDS: &[&str] =
-    &["ssh_command_template", "claude_yolo_command_template"];
+    &["agent_command_override", "agent_extra_args", "extra_env"];
