@@ -8,6 +8,7 @@ import {
 import { useTerminal } from "../hooks/useTerminal";
 import { useMobileKeyboard } from "../hooks/useMobileKeyboard";
 import { MobileTerminalToolbar } from "./MobileTerminalToolbar";
+import { BackToLiveButton } from "./BackToLiveButton";
 import { KeyboardFab } from "./KeyboardFab";
 import { ensureSession } from "../lib/api";
 import type { SessionResponse } from "../lib/types";
@@ -32,14 +33,24 @@ export function TerminalView({ session }: Props) {
     manualReconnect,
     sendData,
     activate,
+    exitScrollback,
     ctrlActiveRef,
     clearCtrlRef,
   } = useTerminal(ensureState === "ready" ? session.id : null);
   const { isMobile, keyboardOpen, keyboardHeight } = useMobileKeyboard();
   const [ctrlActive, setCtrlActive] = useState(false);
 
-  ctrlActiveRef.current = ctrlActive;
-  clearCtrlRef.current = () => setCtrlActive(false);
+  // Sync React state → hook ref in an effect. The mobile toolbar toggles
+  // `ctrlActive` but the wterm native onData callback reads the ref to
+  // decide whether to transform the next keystroke. Writing refs during
+  // render trips react-hooks/refs; a commit-phase effect does the same
+  // work without tripping the lint.
+  useEffect(() => {
+    ctrlActiveRef.current = ctrlActive;
+  });
+  useEffect(() => {
+    clearCtrlRef.current = () => setCtrlActive(false);
+  }, [clearCtrlRef]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -256,6 +267,10 @@ export function TerminalView({ session }: Props) {
               Swipe to scroll
             </span>
           </div>
+        )}
+
+        {isMobile && state.isInScrollback && (
+          <BackToLiveButton onClick={exitScrollback} topOffset="top-3" />
         )}
 
         {isMobile && state.connected && (

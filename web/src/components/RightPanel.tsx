@@ -3,6 +3,7 @@ import { DiffFileList } from "./diff/DiffFileList";
 import { useTerminal } from "../hooks/useTerminal";
 import { useMobileKeyboard } from "../hooks/useMobileKeyboard";
 import { MobileTerminalToolbar } from "./MobileTerminalToolbar";
+import { BackToLiveButton } from "./BackToLiveButton";
 import { KeyboardFab } from "./KeyboardFab";
 import { ensureTerminal } from "../lib/api";
 import type { RichDiffFile, SessionResponse } from "../lib/types";
@@ -49,13 +50,28 @@ function PairedTerminal({
   const [ready, setReady] = useState(false);
   const wsPath =
     mode === "container" ? "container-terminal/ws" : "terminal/ws";
-  const { containerRef, termRef, state, manualReconnect, sendData, activate, ctrlActiveRef, clearCtrlRef } =
-    useTerminal(ready ? sessionId : null, wsPath);
+  const {
+    containerRef,
+    termRef,
+    state,
+    manualReconnect,
+    sendData,
+    activate,
+    exitScrollback,
+    ctrlActiveRef,
+    clearCtrlRef,
+  } = useTerminal(ready ? sessionId : null, wsPath);
   const { isMobile, keyboardOpen, keyboardHeight } = useMobileKeyboard();
   const [ctrlActive, setCtrlActive] = useState(false);
 
-  ctrlActiveRef.current = ctrlActive;
-  clearCtrlRef.current = () => setCtrlActive(false);
+  // See TerminalView.tsx for why these syncs live in effects rather
+  // than running during render.
+  useEffect(() => {
+    ctrlActiveRef.current = ctrlActive;
+  });
+  useEffect(() => {
+    clearCtrlRef.current = () => setCtrlActive(false);
+  }, [clearCtrlRef]);
 
   useEffect(() => {
     let cancelled = false;
@@ -142,6 +158,10 @@ function PairedTerminal({
           className="absolute inset-0"
           onPointerDown={activate}
         />
+
+        {isMobile && state.isInScrollback && (
+          <BackToLiveButton onClick={exitScrollback} topOffset="top-2" />
+        )}
 
         {isMobile && state.connected && (
           <KeyboardFab keyboardOpen={keyboardOpen} onToggle={toggleKeyboard} />
