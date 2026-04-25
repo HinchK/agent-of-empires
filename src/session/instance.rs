@@ -188,6 +188,13 @@ impl Instance {
         self.last_accessed_at = Some(Utc::now());
     }
 
+    /// Return the profile that should drive config resolution for this
+    /// instance, falling back to the user's globally configured default
+    /// when `source_profile` was never populated (e.g. legacy callers).
+    pub fn effective_profile(&self) -> String {
+        super::config::effective_profile(&self.source_profile)
+    }
+
     pub fn is_sub_session(&self) -> bool {
         self.parent_session_id.is_some()
     }
@@ -300,7 +307,11 @@ impl Instance {
         let container = self.get_container_for_instance()?;
         let sandbox = self.sandbox_info.as_ref().unwrap();
 
-        let env_info = build_docker_env_args(sandbox, std::path::Path::new(&self.project_path));
+        let env_info = build_docker_env_args(
+            &self.source_profile,
+            sandbox,
+            std::path::Path::new(&self.project_path),
+        );
         let env_part = if env_info.docker_args.is_empty() {
             String::new()
         } else {
@@ -402,8 +413,11 @@ impl Instance {
         let on_launch_hooks = if skip_on_launch {
             None
         } else {
-            // Start with global+profile hooks as the base
-            let profile = super::config::resolve_default_profile();
+            // Start with global+profile hooks as the base. Use the instance's
+            // source_profile so profile-specific on_launch hooks fire for sessions
+            // created under that profile, not just whichever profile is currently
+            // set as the global default.
+            let profile = self.effective_profile();
             let mut resolved_on_launch = super::profile_config::resolve_config(&profile)
                 .map(|c| c.hooks.on_launch)
                 .unwrap_or_default();
@@ -499,7 +513,11 @@ impl Instance {
                 }
             }
 
-            let env_info = build_docker_env_args(sandbox, std::path::Path::new(&self.project_path));
+            let env_info = build_docker_env_args(
+                &self.source_profile,
+                sandbox,
+                std::path::Path::new(&self.project_path),
+            );
             // AOE_INSTANCE_ID is not secret, goes directly in docker args
             let docker_args = format!("{} -e AOE_INSTANCE_ID={}", env_info.docker_args, self.id);
             let env_part = format!("{} ", docker_args);
@@ -660,6 +678,7 @@ impl Instance {
             self.is_yolo_mode(),
             &self.id,
             self.workspace_info.as_ref(),
+            &self.source_profile,
         )
     }
 
